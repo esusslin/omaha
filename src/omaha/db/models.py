@@ -15,6 +15,7 @@ from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
     BigInteger,
     Boolean,
+    Computed,
     DateTime,
     ForeignKey,
     Index,
@@ -23,7 +24,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
 )
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 EMBEDDING_DIM = 768
@@ -167,6 +168,19 @@ class Chunk(Base):
     """Stamped per row so re-embedding is additive: write the new version alongside the
     old, switch reads, then drop. Impossible if the vector has no provenance."""
     embedded_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    tsv: Mapped[str | None] = mapped_column(
+        TSVECTOR,
+        Computed("to_tsvector('english', text)", persisted=True),
+        nullable=True,
+    )
+    """Lexical half of hybrid retrieval.
+
+    Declared `Computed` so SQLAlchemy knows Postgres owns it and leaves it out of
+    INSERTs — the column has existed since migration 0004, but without this the ORM
+    couldn't query it, which is why hybrid search needed it added here rather than in a
+    new migration. Nothing changes in the database.
+    """
 
 
 class JobRun(Base):

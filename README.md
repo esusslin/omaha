@@ -32,10 +32,60 @@ document and agent infrastructure.
 |---|---|---|
 | 0 | Foundations, schema, health endpoint | ✅ |
 | 1 | Ingestion — conditional fetch, parsers, bitemporal store, scheduler | ✅ |
-| 2 | Chunking, embeddings, hybrid retrieval | 🚧 embeddings done, retrieval next |
-| 3 | Gold set, eval harness, CI gate | — |
+| 2 | Chunking, embeddings, hybrid retrieval | ✅ |
+| 3 | Gold set, eval harness | ✅ CI gate pending |
 | 4 | Agent runtime, typed context records | — |
 | 5 | MCP servers | — |
+
+Current corpus: ~1,200 chunks from the 2025 season, four clubs.
+
+---
+
+## Retrieval results
+
+20 questions, top-10, measured with `make eval`.
+
+| mode | hit@1 | hit@3 | hit@5 | hit@10 | MRR |
+|---|---|---|---|---|---|
+| lexical | 55% | 70% | 70% | 75% | 0.625 |
+| dense | 45% | 70% | 75% | 85% | 0.578 |
+| **hybrid (RRF)** | **65%** | **80%** | **90%** | **95%** | **0.747** |
+
+The number that matters isn't the headline — it's that **the two retrievers fail on
+disjoint questions**, which is the only condition under which fusing them is worth
+anything.
+
+Lexical misses the paraphrases: *"Why is the Commanders quarterback not playing?"* shares
+almost no vocabulary with `Player: Jayden Daniels | Injury: Left Elbow`. Dense misses the
+exact names: `Trey Pipkins III`, `Otito Ogbonnia` — rare proper nouns are precisely what a
+768-dimension average smooths away. Lexical wins on MRR, dense wins on hit@10, fusion wins
+on every column.
+
+### What the harness caught immediately
+
+The first run scored lexical at 15%, with an *identical* hit rate at k=1 and k=10. A
+retriever returning ten results cannot have a flat hit rate — that's the signature of one
+returning zero rows.
+
+Cause: `websearch_to_tsquery` ANDs its terms. *"Is Jalen Carter playing against the
+Commanders?"* became `jalen & carter & play & against & commander`, and the row it should
+find contains neither "playing" nor "against", so Postgres matched nothing. Not a bad
+ranking — an empty result. Switching to OR-of-terms with `ts_rank` doing the
+discriminating took lexical from 0.150 to 0.625 MRR.
+
+Worth stating plainly: without the eval this would have shipped. Hybrid search "worked",
+returned plausible results, and was quietly running on one retriever.
+
+### The remaining miss
+
+`calcaterra-illness` fails in all three modes, and it's instructive. Grant Calcaterra
+appears four times with four different injuries, so retrieval must discriminate among his
+own rows. The query — *"Which Eagles tight end missed practice with an illness?"* — offers
+almost no help: "Eagles" matches 318 chunks and "practice" matches **every** structured
+row, because `Practice:` is a folded-in column label. Only "illness" carries signal.
+
+That's a real tension, not a bug: header folding makes chunks self-contained and citable,
+helps dense retrieval, and dilutes lexical ranking. Documented rather than hidden.
 
 ---
 
@@ -86,11 +136,26 @@ uv run python -m omaha.ingest.run asof --name ne-injury --when 2026-09-10T18:00:
 ### Retrieval
 
 ```bash
-make chunk               # host — pure Python
-make worker              # build the Linux image (one-time)
-make embed               # container — needs ONNX Runtime
+make chunk                # host — pure Python
+make worker               # build the Linux image (one-time)
+make embed                # container — needs ONNX Runtime
 make retrieve-status
+make audit                # extraction quality, counted
+
+make search q="which Eagles lineman is out with a foot injury"
+make eval                 # compare lexical / dense / hybrid over the gold set
+make eval-lexical         # host-only, no model needed
 ```
+
+Point-in-time search — the reason the store is bitemporal:
+
+```bash
+uv run python -m omaha.retrieve.search_cli \
+    --query "who is questionable" --as-of 2025-12-19T17:00:00Z
+```
+
+Ask that with and without `--as-of` and the answers differ, because Thursday's report and
+Saturday's are separate rows and neither overwrote the other.
 
 ---
 
@@ -157,6 +222,36 @@ stays installable on any host.
 docker compose --profile worker run --rm worker uv run python -m omaha.retrieve.run embed
 ```
 
+### RRF, not score blending
+
+Cosine similarity and `ts_rank` are not on a comparable scale, and normalising them needs
+per-query calibration that drifts as the corpus grows. Reciprocal Rank Fusion ignores
+scores entirely and uses only rank position: each retriever contributes `1/(k + rank)` to
+every chunk it returns. No tuning, and one retriever returning confident nonsense cannot
+poison the merge.
+
+`k` stays at 60, the value from Cormack et al. Fitting it to 20 questions would be fitting
+it to noise.
+
+`hybrid_search` takes the embedder as an argument rather than importing it, so the module
+imports on a machine where `fastembed` won't install and degrades to lexical-only instead
+of raising.
+
+### The gold set matches on content, not chunk ids
+
+The extractor changed four times in one week and chunk ids churned every time. A gold set
+pinned to ids would have needed rewriting at each step — and would have measured nothing
+in between. Questions assert on strings:
+
+```json
+{ "must_contain": ["Cameron Latu", "Thursday", "FULL"] }
+```
+
+That survives re-chunking, re-embedding and extractor changes. It's also deliberately
+strict about *which* row: Latu appears three times with three different statuses, so
+"right player, wrong day" scores as a miss. A looser predicate would report success while
+answering the wrong question, which is how eval harnesses come to lie.
+
 ### bge-base-en-v1.5, not bge-m3
 
 M3 is 568M parameters and multilingual; base is 109M and English-only. Practice reports
@@ -170,6 +265,74 @@ no provenance.
 BGE wants a prefix on *queries* but not on stored passages — `embed_query` and
 `embed_passages` are separate functions because getting it backwards is a silent 5–10%
 retrieval regression that no test catches.
+
+### The injury table is client-rendered — the archive is in the news articles
+
+The obvious source, `/team/injury-report/` on a club site, returns the week selector and
+the legend and **no player rows, ever**. The table is rendered client-side. Verified
+against two clubs, in and out of season.
+
+This is the failure mode worth dwelling on: a collector pointed at that URL fetches 200,
+parses successfully, dedups cleanly, and reports healthy forever while storing page
+furniture. Nothing alerts. You find out in week six.
+
+What *is* server-rendered is each club's weekly injury-report news article — and it's
+richer than the widget: one article carries both teams and the full Tuesday → Wednesday →
+Thursday progression. So sources come in two shapes now. An **index source** is polled on
+a cadence, and the articles it links are fetched once each and never re-polled, because an
+article is immutable after publication. Snapshot sources ask *"has this URL changed?"*;
+index-discovered articles ask *"is this URL new?"* — a different question needing a
+different dedup path.
+
+Coverage is uneven and worth knowing before relying on it: of 32 clubs, four curate a
+season archive on that page (ATL 25 articles, PHI 25, SF 18, PIT 4). `run discover` reports
+what each index actually links, storing nothing, so this is measured rather than assumed.
+
+### Rows are reconstructed from prose, then handed to the chunker unchanged
+
+Those articles contain no `<table>` markup — the data is lines under headings:
+
+```
+Thursday's Injury Report
+Eagles Injury Report
+Out
+DT Jalen Carter (Shoulders/Did Not Participate)
+```
+
+`ingest/report.py` rebuilds rows from that text and emits **the same shape `parse_html`
+produces for real tables**, so the row-per-player chunker consumes it with no changes at
+all.
+
+Team headings match against the 32 real club nicknames rather than a regex. Three
+successive patterns got this wrong: `^[A-Z]` silently dropped every `49ers` heading,
+end-anchoring missed `Injury Report Ahead of Week 12`, and neither handled Pittsburgh's
+`Week 17 Injury Report (Browns)`. A closed vocabulary handles all three and — more
+importantly — **cannot invent a team that doesn't exist**. A malformed heading yields
+nothing rather than something plausible like "Week 17" that would never join to anything.
+
+Roughly 8% of rows end up with no team, from blocks that genuinely name none. They're left
+empty. A wrong team is worse than a missing one: it embeds, it ranks, it gets cited, and it
+answers confidently about the wrong player.
+
+### Extraction is frozen at ingest, so `reparse` exists
+
+`parse()` runs once and its output is persisted. Improving a parser therefore changes
+nothing for documents already collected — re-chunking just replays the stored tables. This
+was discovered the hard way, by "fixing" an extractor three times and getting
+byte-identical audit output each time.
+
+`run reparse` re-runs the parsers over the original bytes in `raw_ref` and refreshes the
+derived fields. `content_hash`, `knowledge_time` and the raw files are untouched.
+
+Which is what `raw_ref` was always for — but storing the originals is only half of it. The
+command to use them has to exist too.
+
+### `audit` counts what sampling only hints at
+
+Retrieval hides bad extraction: a chunk with the wrong team still embeds, still ranks,
+still gets cited. `make audit` reports unattributed rows, prose fallbacks, and distinct
+teams seen. That last one is a canary — there are 32 clubs, so a number far above it means
+headings are being misread as team names.
 
 ### PDFs use pdfplumber, not docling
 
@@ -185,10 +348,16 @@ Official club practice and injury reports, inactives, transactions, press confer
 transcripts, published depth charts. **Official and public feeds only** — no paywalled
 scraping.
 
+Fetching is paced to one request per second per host. Conditional requests keep repeat
+polls of a single URL cheap, but a backfill walks dozens of *new* article URLs per club
+where ETags buy nothing — so the throttle is per host, and different clubs don't block
+each other.
+
 ## Stack
 
 Python 3.13 · FastAPI · SQLAlchemy 2 · Alembic · Postgres 17 + pgvector · APScheduler ·
-pdfplumber · trafilatura · fastembed (ONNX) · uv · ruff · mypy · pytest · Docker
+pdfplumber · trafilatura · selectolax · fastembed (ONNX) · uv · ruff · mypy · pytest ·
+Docker
 
 ## Licence
 

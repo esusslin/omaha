@@ -44,3 +44,17 @@ embed:         ## embed chunks (container — needs onnxruntime)
 
 retrieve-status:
 	uv run python -m omaha.retrieve.run status
+
+audit:         ## extraction quality, counted
+	uv run python -m omaha.retrieve.run audit
+
+search:        ## hybrid search: make search q="who is out with a foot injury"
+	docker compose --profile worker run --rm worker \
+		uv run python -m omaha.retrieve.search_cli --query "$(q)"
+
+eval:          ## compare lexical / dense / hybrid over the gold set (container)
+	docker compose --profile worker run --rm worker \
+		uv run python -m omaha.eval.run --mode all --show-misses
+
+eval-lexical:  ## lexical only — no model needed, runs on the host
+	uv run python -m omaha.eval.run --mode lexical --show-misses

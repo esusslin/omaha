@@ -9,6 +9,12 @@ credentials.json
 # data — raw documents and vectors stay local
 data/
 *.db
+
+# ...except the gold set. It's the evaluation spec, not data: no secrets, a few KB,
+# and `make eval` is unrunnable without it. Raw fetched club HTML stays out — 39 MB
+# of someone else's copyrighted pages has no business in a public repo.
+!data/gold/
+!data/gold/**
 *.sqlite
 *.parquet
 *.duckdb
