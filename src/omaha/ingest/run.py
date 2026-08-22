@@ -106,7 +106,9 @@ def cmd_once(args: argparse.Namespace) -> int:
 def cmd_sweep(args: argparse.Namespace) -> int:
     """Cadence-aware by default; --force ignores cadence (never do this on a schedule)."""
     with session_scope() as session:
-        outcome = run_sweep(session, job_name="cli", kind=args.kind, due_only=not args.force)
+        outcome = run_sweep(
+            session, job_name="cli", kind=args.kind, name=args.name, due_only=not args.force
+        )
     if not outcome.lines:
         print("nothing due")
         return 0
@@ -139,6 +141,151 @@ def cmd_jobs(args: argparse.Namespace) -> int:
             )
             if r.error:
                 print(f"      error: {r.error}")
+    return 0
+
+
+def cmd_seed(args: argparse.Namespace) -> int:
+    """Register all 32 clubs. Idempotent — existing sources are left alone.
+
+    Also retires any legacy source pointing straight at a `/team/injury-report/` page,
+    because that page's table is client-rendered: it fetches 200, parses to the legend,
+    and reports healthy forever while storing nothing.
+    """
+    from omaha.ingest.seeds import all_seeds
+
+    added = skipped = retired = 0
+    with session_scope() as session:
+        for seed in all_seeds():
+            existing = session.scalars(select(Source).where(Source.name == seed.name)).first()
+            if existing:
+                skipped += 1
+                continue
+            session.add(
+                Source(
+                    name=seed.name,
+                    kind=seed.kind,
+                    url=seed.url,
+                    team=seed.team,
+                    cadence_seconds=seed.cadence_seconds,
+                )
+            )
+            added += 1
+
+        if not args.keep_legacy:
+            stale = session.scalars(
+                select(Source).where(
+                    Source.kind == "injury_report",
+                    Source.url.like("%/team/injury-report%"),
+                    Source.enabled.is_(True),
+                )
+            ).all()
+            for source in stale:
+                source.enabled = False
+                source.last_error = "disabled: injury table is client-rendered, use the index"
+                retired += 1
+
+        session.flush()
+
+    print(f"added {added}, already present {skipped}, retired {retired}")
+    return 0
+
+
+def cmd_discover(args: argparse.Namespace) -> int:
+    """Show what an index links to, without storing anything.
+
+    Coverage varies by club — some list a full season of reports, some only latest news.
+    This is how you find out which, rather than assuming.
+    """
+    import httpx
+
+    from omaha.ingest.discover import discover_links
+
+    with session_scope() as session:
+        query = select(Source).where(Source.kind == "injury_index")
+        if args.name:
+            query = query.where(Source.name == args.name)
+        sources = session.scalars(query.order_by(Source.name)).all()
+
+        if not sources:
+            print("no index sources registered — run `seed` first")
+            return 1
+
+        with httpx.Client(timeout=settings.request_timeout_seconds) as client:
+            for source in sources:
+                result = fetch(source.url, client=client)
+                if not result.ok or not result.content:
+                    print(f"{source.name:<22} FAIL {result.error or result.status_code}")
+                    continue
+
+                html = result.content.decode("utf-8", errors="replace")
+                links = discover_links(html, base_url=result.url)
+                unseen = sum(1 for x in links if not store.has_seen_url(session, source, x.url))
+                print(f"{source.name:<22} {len(links):>3} linked, {unseen:>3} new")
+
+                if args.verbose:
+                    for link in links[: args.limit]:
+                        print(f"    {link.title[:70]}")
+    return 0
+
+
+def cmd_reparse(args: argparse.Namespace) -> int:
+    """Re-run the parsers over stored originals, refreshing `parsed_text`/`parsed_tables`.
+
+    Extraction is frozen at ingest time: `parse()` runs once and its output is persisted.
+    So improving a parser changes nothing for documents already collected — re-chunking
+    just replays the stored tables. This is the step that closes that loop, and the
+    reason `raw_ref` keeps every original byte.
+
+    Documents stay immutable where it counts: `content_hash`, `knowledge_time` and the
+    raw file are untouched. Only derived fields are rewritten. `text_hash` is refreshed
+    too, since it describes the parsed text and would otherwise start lying.
+    """
+    from pathlib import Path
+
+    from omaha.ingest.store import text_fingerprint
+
+    with session_scope() as session:
+        query = select(Document).order_by(Document.id)
+        if args.doc_type:
+            query = query.where(Document.doc_type == args.doc_type)
+        documents = session.scalars(query.limit(args.limit)).all()
+
+        changed = missing = 0
+        for document in documents:
+            if not document.raw_ref or not Path(document.raw_ref).exists():
+                missing += 1
+                continue
+
+            content = Path(document.raw_ref).read_bytes()
+            parsed = parse(content, content_type=None, url=document.source_url)
+            if parsed.is_empty:
+                continue
+
+            # Count rows, not tables. The prose extractor always emits exactly one
+            # table, so comparing table counts reports "unchanged" no matter how much
+            # the extraction improved — which is worse than no metric at all.
+            def _rows(tables: list[dict] | None) -> int:
+                return sum(len(t.get("rows", [])) for t in (tables or []))
+
+            before = (document.text_hash, _rows((document.parsed_tables or {}).get("tables")))
+            document.parsed_text = parsed.text or None
+            document.parsed_tables = (
+                {"tables": parsed.tables, "parser": parsed.parser} if parsed.tables else None
+            )
+            document.text_hash = text_fingerprint(parsed.text)
+            after = (document.text_hash, _rows(parsed.tables))
+
+            if before != after:
+                changed += 1
+                if args.verbose:
+                    print(f"doc {document.id}: rows {before[1]} -> {after[1]} ({parsed.parser})")
+
+        session.flush()
+
+    print(f"reparsed {len(documents)} documents, {changed} changed")
+    if missing:
+        print(f"  {missing} had no readable raw file — those cannot be reparsed")
+    print("\nnow: uv run python -m omaha.retrieve.run chunk --rechunk")
     return 0
 
 
@@ -185,12 +332,33 @@ def main(argv: list[str] | None = None) -> int:
 
     p_sweep = sub.add_parser("sweep", help="ingest sources that are due")
     p_sweep.add_argument("--kind", default=None)
+    p_sweep.add_argument("--name", default=None, help="one source, for a cautious first run")
     p_sweep.add_argument("--force", action="store_true", help="ignore cadence and fetch everything")
     p_sweep.set_defaults(func=cmd_sweep)
 
     p_jobs = sub.add_parser("jobs", help="recent scheduled runs")
     p_jobs.add_argument("--limit", type=int, default=20)
     p_jobs.set_defaults(func=cmd_jobs)
+
+    p_seed = sub.add_parser("seed", help="register all 32 clubs")
+    p_seed.add_argument(
+        "--keep-legacy",
+        action="store_true",
+        help="don't disable old client-rendered injury-report sources",
+    )
+    p_seed.set_defaults(func=cmd_seed)
+
+    p_re = sub.add_parser("reparse", help="re-run parsers over stored originals")
+    p_re.add_argument("--limit", type=int, default=1000)
+    p_re.add_argument("--doc-type", default=None)
+    p_re.add_argument("--verbose", action="store_true")
+    p_re.set_defaults(func=cmd_reparse)
+
+    p_disc = sub.add_parser("discover", help="show what indexes link to, storing nothing")
+    p_disc.add_argument("--name", default=None, help="one index source; default is all")
+    p_disc.add_argument("--verbose", action="store_true", help="print link titles")
+    p_disc.add_argument("--limit", type=int, default=10)
+    p_disc.set_defaults(func=cmd_discover)
 
     p_asof = sub.add_parser("asof", help="what did we know at a point in time?")
     p_asof.add_argument("--name", required=True)

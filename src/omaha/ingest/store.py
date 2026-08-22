@@ -77,6 +77,25 @@ def as_of(session: Session, source: Source, when: dt.datetime) -> Document | Non
     ).first()
 
 
+def has_seen_url(session: Session, source: Source, url: str) -> bool:
+    """Have we already stored this exact article?
+
+    Snapshot sources ask "has this URL changed?" — index-discovered articles ask "is this
+    URL new?", because an article is immutable once published. Different question, so it
+    needs its own check: `latest_document` compares against whatever was stored last,
+    which for an index source is a *different* article and would always look like a
+    change.
+    """
+    return (
+        session.scalars(
+            select(Document.id)
+            .where(Document.source_id == source.id, Document.source_url == url)
+            .limit(1)
+        ).first()
+        is not None
+    )
+
+
 def record_failure(session: Session, source: Source, error: str, at: dt.datetime) -> None:
     source.last_attempt_at = at
     source.last_error = error
@@ -152,5 +171,58 @@ def store_document(
     if fetch_result.last_modified:
         source.last_modified = fetch_result.last_modified
 
+    session.flush()
+    return document
+
+
+def store_discovered_document(
+    session: Session,
+    source: Source,
+    fetch_result: FetchResult,
+    parsed: ParsedDocument,
+    *,
+    published_time: dt.datetime | None = None,
+    doc_type: str = "injury_report",
+    season: int | None = None,
+    week: int | None = None,
+) -> Document | None:
+    """Persist one article found via an index source.
+
+    Unlike `store_document` this does not update the source's health — the *index* is the
+    source, and its health is decided by whether the index itself fetched, not by whether
+    one of twenty linked articles happened to 404.
+
+    `published_time` is the article's own claim about when it was published;
+    `knowledge_time` remains the moment we fetched it. On a backfill those differ by
+    months, and that gap is exactly what stops a backtest reading the future.
+    """
+    at = fetch_result.fetched_at
+    content_hash = fetch_result.content_hash
+    if content_hash is None or fetch_result.content is None:
+        return None
+
+    if has_seen_url(session, source, fetch_result.url):
+        return None
+
+    raw_ref = _raw_path(source, at, content_hash)
+    raw_ref.write_bytes(fetch_result.content)
+
+    document = Document(
+        source_id=source.id,
+        source_url=fetch_result.url,
+        doc_type=doc_type,
+        team=source.team,
+        season=season,
+        week=week,
+        knowledge_time=at,
+        published_time=published_time,
+        fetch_time=at,
+        content_hash=content_hash,
+        text_hash=text_fingerprint(parsed.text),
+        raw_ref=str(raw_ref),
+        parsed_text=parsed.text or None,
+        parsed_tables={"tables": parsed.tables, "parser": parsed.parser} if parsed.tables else None,
+    )
+    session.add(document)
     session.flush()
     return document

@@ -121,9 +121,23 @@ def parse_html(content: bytes, *, url: str | None = None) -> ParsedDocument:
         if rows:
             tables.append({"page": 0, "index": table_no, "rows": rows})
 
-    return ParsedDocument(
-        text=text.strip(), tables=tables, parser="trafilatura+selectolax", warnings=warnings
-    )
+    parser = "trafilatura+selectolax"
+
+    # Club injury-report articles carry the data as prose, not `<table>` markup — and
+    # the widget page that *does* have a table renders it client-side, so we never see
+    # it. Recover rows from the text so the row-per-player chunker still applies.
+    # Imported here rather than at module scope: report.py depends on this module's
+    # participation vocabulary, so a top-level import would be circular.
+    if not tables:
+        from omaha.ingest.report import extract_injury_tables, looks_like_injury_report
+
+        if looks_like_injury_report(text):
+            derived = extract_injury_tables(text)
+            if derived:
+                tables = derived
+                parser = "trafilatura+prose_injury_report"
+
+    return ParsedDocument(text=text.strip(), tables=tables, parser=parser, warnings=warnings)
 
 
 def parse(content: bytes, *, content_type: str | None, url: str | None = None) -> ParsedDocument:

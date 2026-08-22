@@ -11,6 +11,7 @@ from __future__ import annotations
 import datetime as dt
 from typing import Any
 
+from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
     BigInteger,
     Boolean,
@@ -24,6 +25,9 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+
+EMBEDDING_DIM = 768
+"""BAAI/bge-base-en-v1.5. Changing this is a migration, not a config tweak."""
 
 
 class Base(DeclarativeBase):
@@ -152,9 +156,17 @@ class Chunk(Base):
     span_start: Mapped[int | None] = mapped_column(Integer, nullable=True)
     span_end: Mapped[int | None] = mapped_column(Integer, nullable=True)
     section_path: Mapped[str | None] = mapped_column(Text, nullable=True)
-    """e.g. 'injury_report > Wednesday > offense'"""
+    """e.g. 'injury_report > table 0 > row 3'"""
 
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+    # --- retrieval ---
+    embedding: Mapped[list[float] | None] = mapped_column(Vector(EMBEDDING_DIM), nullable=True)
+    embedding_model: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    embedding_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    """Stamped per row so re-embedding is additive: write the new version alongside the
+    old, switch reads, then drop. Impossible if the vector has no provenance."""
+    embedded_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class JobRun(Base):

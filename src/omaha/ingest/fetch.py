@@ -16,7 +16,10 @@ from __future__ import annotations
 
 import datetime as dt
 import hashlib
+import threading
+import time
 from dataclasses import dataclass
+from urllib.parse import urlparse
 
 import httpx
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
@@ -24,6 +27,27 @@ from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_ex
 from omaha.config import get_settings
 
 settings = get_settings()
+
+# Last request time per host. Conditional requests make repeat polls of one URL cheap,
+# but a backfill walks dozens of new article URLs per club and ETags do nothing there —
+# so pace by host. Locked because the scheduler may run jobs on separate threads.
+_last_request_at: dict[str, float] = {}
+_throttle_lock = threading.Lock()
+
+
+def _throttle(url: str) -> None:
+    """Sleep just long enough to keep one host under the configured request rate."""
+    interval = settings.min_request_interval_seconds
+    if interval <= 0:
+        return
+
+    host = urlparse(url).netloc
+    with _throttle_lock:
+        elapsed = time.monotonic() - _last_request_at.get(host, 0.0)
+        wait = interval - elapsed
+        if wait > 0:
+            time.sleep(wait)
+        _last_request_at[host] = time.monotonic()
 
 
 @dataclass(frozen=True)
@@ -88,6 +112,7 @@ def fetch(
     client = client or httpx.Client(timeout=settings.request_timeout_seconds)
 
     try:
+        _throttle(url)
         response = _request(client, url, headers)
     except Exception as exc:
         return FetchResult(url=url, status_code=0, fetched_at=now, error=repr(exc))

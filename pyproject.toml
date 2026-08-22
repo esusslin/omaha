@@ -46,9 +46,19 @@ dev = [
     "pre-commit>=4.0",
     "types-python-dateutil",
 ]
-# Phase 2 embedding deps (sentence-transformers, torch) are deliberately NOT here.
-# torch has no x86_64 macOS wheels past 2.2, and embedding runs on the server anyway.
-# See docs/PHASE2.md when we get there.
+
+# Embeddings are an OPTIONAL extra, installed only in the Linux container.
+#
+# Neither torch (past 2.2) nor onnxruntime (past ~1.19) ships x86_64 macOS wheels any
+# more, so the local dev machine cannot run the model at all. Rather than pin ancient
+# versions and pretend, embedding runs where it runs in production: linux/amd64.
+#
+#   docker compose run --rm worker python -m omaha.retrieve.run embed
+#
+# `uv sync --extra dev` stays installable on any host; only the container adds this.
+embed = [
+    "fastembed>=0.5",
+]
 
 [build-system]
 requires = ["hatchling"]

@@ -92,11 +92,86 @@ def ingest_one(
     )
 
 
+INDEX_KINDS = {"injury_index"}
+
+
+def ingest_index(
+    session: Session,
+    source: Source,
+    client: httpx.Client | None = None,
+    *,
+    max_articles: int = 25,
+) -> tuple[str, bool, int]:
+    """Fetch an index page, then fetch the articles it links that we haven't seen.
+
+    Returns (status line, failed, documents created).
+
+    The index itself is never stored — it is navigation, not content. Its own HTML is
+    the week selector and the legend, which is precisely the boilerplate that made the
+    original single-URL source look healthy while collecting nothing.
+
+    `max_articles` bounds a single pass so a first run against a full season archive
+    doesn't hammer a club in one burst. Anything not reached this time is picked up on
+    the next sweep, since seen-ness is decided per URL.
+    """
+    from omaha.ingest.discover import discover_links, extract_published_time, parse_display_date
+
+    result = fetch(source.url, etag=source.etag, last_modified=source.last_modified, client=client)
+
+    if result.error or result.status_code not in (200, 304):
+        store.record_failure(
+            session, source, result.error or f"HTTP {result.status_code}", result.fetched_at
+        )
+        return f"FAIL   {source.name}: {result.error or result.status_code}", True, 0
+
+    if result.not_modified:
+        store.record_unchanged(session, source, result.fetched_at)
+        return f"304    {source.name}: index unchanged", False, 0
+
+    html = (result.content or b"").decode("utf-8", errors="replace")
+    links = discover_links(html, base_url=result.url)
+    fresh = [link for link in links if not store.has_seen_url(session, source, link.url)]
+
+    created = 0
+    for link in fresh[:max_articles]:
+        article = fetch(link.url, client=client)
+        if not article.ok or not article.content:
+            continue
+
+        parsed = parse(article.content, content_type=article.content_type, url=article.url)
+        if parsed.is_empty:
+            continue
+
+        article_html = article.content.decode("utf-8", errors="replace")
+        published = extract_published_time(article_html) or parse_display_date(parsed.text[:600])
+
+        document = store.store_discovered_document(
+            session,
+            source,
+            article,
+            parsed,
+            published_time=published,
+            doc_type="inactives" if "inactives" in link.title.lower() else "injury_report",
+        )
+        if document is not None:
+            created += 1
+
+    # Index health reflects the index fetch, not the articles under it.
+    store.record_unchanged(session, source, result.fetched_at)
+
+    return (
+        f"INDEX  {source.name}: {len(links)} linked, {len(fresh)} new, {created} stored",
+        False,
+        created,
+    )
+
+
 def sweep(
     session: Session,
     *,
     job_name: str = "manual",
     kind: str | None = None,
+    name: str | None = None,
     due_only: bool = True,
 ) -> SweepOutcome:
     """Run one sweep, recording a JobRun.
@@ -115,16 +190,23 @@ def sweep(
         query = select(Source).where(Source.enabled.is_(True))
         if kind:
             query = query.where(Source.kind == kind)
+        if name:
+            query = query.where(Source.name == name)
         sources = session.scalars(query.order_by(Source.name)).all()
 
         candidates = [s for s in sources if not due_only or is_due(s, now)]
 
         with httpx.Client(timeout=settings.request_timeout_seconds) as client:
             for source in candidates:
-                line, failed, created = ingest_one(session, source, client=client)
+                if source.kind in INDEX_KINDS:
+                    line, failed, created = ingest_index(session, source, client=client)
+                else:
+                    line, failed, made = ingest_one(session, source, client=client)
+                    created = int(made)
+
                 outcome.attempted += 1
                 outcome.failed += int(failed)
-                outcome.created += int(created)
+                outcome.created += created
                 assert outcome.lines is not None
                 outcome.lines.append(line)
 

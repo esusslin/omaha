@@ -17,5 +17,29 @@ services:
       timeout: 3s
       retries: 10
 
+  # Anything needing ML wheels runs here — the host can't install them.
+  # linux/amd64 runs natively on Intel, so there's no emulation cost.
+  worker:
+    build: .
+    platform: linux/amd64
+    container_name: omaha-worker
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+psycopg://omaha:omaha_local_dev@postgres:5432/omaha
+      SCHEDULER_ENABLED: "false"
+      DATA_DIR: /app/data
+    volumes:
+      - .:/app
+      # Anonymous volume shadows the bind mount so the container keeps the Linux
+      # .venv baked into the image. Without this, uv sees the host's macOS venv,
+      # deletes it, and rebuilds for Linux — destroying the host environment.
+      - /app/.venv
+      - omaha_models:/models
+    profiles: ["worker"]   # only starts when asked
+    command: ["sleep", "infinity"]
+
 volumes:
   omaha_pgdata:
+  omaha_models:

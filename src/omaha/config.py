@@ -26,6 +26,12 @@ class Settings(BaseSettings):
     request_timeout_seconds: float = 30.0
     max_retries: int = 3
 
+    # Minimum gap between requests to the same host. Conditional requests keep repeat
+    # polls cheap, but a backfill walks dozens of *new* article URLs per club, where
+    # ETags buy nothing — so pace them. One request per second per host is well under
+    # what a club CDN notices, and the whole backfill is still bounded by article count.
+    min_request_interval_seconds: float = 1.0
+
     # staleness thresholds, in seconds, used by /health
     # a source overdue by more than this reports ok=false
     staleness_grace_seconds: int = 3600 * 6
