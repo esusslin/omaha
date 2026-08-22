@@ -155,3 +155,32 @@ class Chunk(Base):
     """e.g. 'injury_report > Wednesday > offense'"""
 
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+class JobRun(Base):
+    """One execution of a scheduled job.
+
+    A collector you can't observe is a collector you'll discover was broken in week
+    six. "Did Wednesday's sweep run, and what did it find?" should be a query.
+    """
+
+    __tablename__ = "job_runs"
+    __table_args__ = (Index("ix_job_runs_name_started", "job_name", "started_at"),)
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    job_name: Mapped[str] = mapped_column(String(64))
+
+    started_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    finished_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    ok: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    sources_attempted: Mapped[int] = mapped_column(Integer, default=0)
+    sources_failed: Mapped[int] = mapped_column(Integer, default=0)
+    documents_created: Mapped[int] = mapped_column(Integer, default=0)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    @property
+    def duration_seconds(self) -> float | None:
+        if self.finished_at is None:
+            return None
+        return (self.finished_at - self.started_at).total_seconds()

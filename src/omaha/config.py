@@ -18,6 +18,9 @@ class Settings(BaseSettings):
     # storage for raw originals (Phase 1 keeps them on disk)
     data_dir: str = "./data"
 
+    # scheduler — disable when running >1 replica, or two collectors race
+    scheduler_enabled: bool = True
+
     # ingestion
     user_agent: str = "omaha/0.1 (+https://github.com/esusslin/omaha)"
     request_timeout_seconds: float = 30.0

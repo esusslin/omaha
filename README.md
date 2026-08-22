@@ -74,6 +74,23 @@ liveness. It returns 200 while the process is alive and sets `ok: false` when a 
 overdue, so an orchestrator doesn't restart a healthy container over stale upstream data.
 Alert on `ok`, not on the status code.
 
+## Collection schedule
+
+| Job | When | What |
+|---|---|---|
+| `injury_sweep` | Wed/Thu/Fri **17:00 America/New_York** | Practice reports, an hour after the league's 4pm ET filing deadline |
+| `hourly_sweep` | hourly at :07 | Everything else, gated by each source's own cadence |
+
+Cron runs in Eastern, not UTC — the NFL deadline is 4pm ET, and a UTC schedule drifts an
+hour across daylight saving, which lands in November when the reports start mattering.
+
+Sources declare a `cadence_seconds`; the scheduler fires often and the sweep decides who
+is actually due. Gating is on last *attempt*, not last success, so a failing source isn't
+retried against a struggling origin on every tick.
+
+`GET /jobs` shows recent runs. `GET /health` reports per-source staleness and whether the
+last scheduled sweep succeeded.
+
 ## Sources
 
 Official club practice and injury reports, inactives, transactions, press conference

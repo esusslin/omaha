@@ -145,3 +145,55 @@ def test_fingerprint_is_stable_across_calls() -> None:
     from omaha.ingest.store import text_fingerprint
 
     assert text_fingerprint("same text") == text_fingerprint("same text")
+
+
+# --- cadence gating ---------------------------------------------------------------
+
+
+def _source(**kw):
+    from omaha.db.models import Source
+
+    defaults = dict(
+        name="s",
+        kind="injury_report",
+        url="https://example.com",
+        enabled=True,
+        cadence_seconds=3600,
+        last_attempt_at=None,
+    )
+    defaults.update(kw)
+    return Source(**defaults)
+
+
+def test_never_attempted_is_due() -> None:
+    from omaha.ingest.sweep import is_due
+
+    assert is_due(_source(), NOW)
+
+
+def test_recently_attempted_is_not_due() -> None:
+    from omaha.ingest.sweep import is_due
+
+    src = _source(last_attempt_at=NOW - dt.timedelta(minutes=10))
+    assert not is_due(src, NOW)
+
+
+def test_past_cadence_is_due() -> None:
+    from omaha.ingest.sweep import is_due
+
+    src = _source(last_attempt_at=NOW - dt.timedelta(hours=2))
+    assert is_due(src, NOW)
+
+
+def test_disabled_is_never_due() -> None:
+    from omaha.ingest.sweep import is_due
+
+    assert not is_due(_source(enabled=False), NOW)
+
+
+def test_gating_uses_attempt_not_success() -> None:
+    """A failing source must not be retried on every tick — that hammers a sick origin."""
+    from omaha.ingest.sweep import is_due
+
+    src = _source(last_attempt_at=NOW - dt.timedelta(minutes=5), last_success_at=None)
+    assert not is_due(src, NOW)

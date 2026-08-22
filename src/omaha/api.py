@@ -1,9 +1,10 @@
 """FastAPI application.
 
-/health reports per-source staleness rather than just process liveness. It returns 200
-while the process is alive — so the platform doesn't restart a healthy container over
-stale upstream data — and sets ok=false when a source is overdue. Point an external
-pinger at it and alert on `ok`, not on status code.
+/health reports per-source staleness and recent job outcomes rather than just process
+liveness. It returns 200 while the process is alive — so the platform doesn't restart a
+healthy container over stale upstream data — and sets ok=false when a source is overdue
+or the last scheduled sweep failed. Point an external pinger at it and alert on `ok`,
+not on status code.
 
 (Pattern lifted from the-algo, which learned it the hard way.)
 """
@@ -11,25 +12,54 @@ pinger at it and alert on `ok`, not on status code.
 from __future__ import annotations
 
 import datetime as dt
+import logging
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Annotated, Any
 
 from fastapi import Depends, FastAPI
-from sqlalchemy import func, select
+from sqlalchemy import desc, func, select
 from sqlalchemy.orm import Session
 
 from omaha.config import get_settings
-from omaha.db.models import Document, Source
+from omaha.db.models import Document, JobRun, Source
 from omaha.db.session import get_session
+from omaha.scheduler import build_scheduler
+
+logger = logging.getLogger(__name__)
+settings = get_settings()
 
 # Annotated dependency alias — keeps Depends() out of argument defaults (ruff B008)
 DbSession = Annotated[Session, Depends(get_session)]
 
-settings = get_settings()
+
+@asynccontextmanager
+async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    """Start the collector alongside the API, unless explicitly disabled.
+
+    Set OMAHA_SCHEDULER_ENABLED=false when running multiple replicas — two schedulers
+    against one database means duplicate fetches. Single replica is the intended shape
+    for now.
+    """
+    scheduler = None
+    if settings.scheduler_enabled:
+        scheduler = build_scheduler()
+        scheduler.start()
+        logger.info("scheduler started with jobs: %s", [j.id for j in scheduler.get_jobs()])
+    else:
+        logger.info("scheduler disabled by configuration")
+
+    yield
+
+    if scheduler is not None:
+        scheduler.shutdown(wait=False)
+
 
 app = FastAPI(
     title="Omaha",
     version="0.1.0",
     description="Document intelligence for NFL prediction. Agents produce evidence, never probabilities.",
+    lifespan=lifespan,
 )
 
 
@@ -45,9 +75,7 @@ def health(session: DbSession) -> dict[str, Any]:
         stale = src.is_stale
         if stale:
             all_ok = False
-        age = (
-            (now - src.last_success_at).total_seconds() if src.last_success_at is not None else None
-        )
+        age = (now - src.last_success_at).total_seconds() if src.last_success_at else None
         report.append(
             {
                 "name": src.name,
@@ -61,10 +89,26 @@ def health(session: DbSession) -> dict[str, Any]:
             }
         )
 
+    last_run = session.scalars(select(JobRun).order_by(desc(JobRun.started_at)).limit(1)).first()
+    if last_run is not None and not last_run.ok:
+        all_ok = False
+
     return {
         "ok": all_ok,
         "env": settings.env,
         "checked_at": now.isoformat(),
+        "scheduler_enabled": settings.scheduler_enabled,
+        "last_job": {
+            "name": last_run.job_name,
+            "started_at": last_run.started_at.isoformat(),
+            "ok": last_run.ok,
+            "attempted": last_run.sources_attempted,
+            "failed": last_run.sources_failed,
+            "created": last_run.documents_created,
+            "duration_seconds": last_run.duration_seconds,
+        }
+        if last_run
+        else None,
         "sources": report,
     }
 
@@ -79,6 +123,30 @@ def stats(session: DbSession) -> dict[str, Any]:
         "documents": doc_count or 0,
         "sources": src_count or 0,
         "latest_knowledge_time": latest.isoformat() if latest else None,
+    }
+
+
+@app.get("/jobs")
+def jobs(session: DbSession, limit: int = 20) -> dict[str, Any]:
+    """Recent scheduled runs — the answer to 'did Wednesday's sweep happen?'"""
+    runs = session.scalars(
+        select(JobRun).order_by(desc(JobRun.started_at)).limit(min(limit, 100))
+    ).all()
+    return {
+        "runs": [
+            {
+                "id": r.id,
+                "job_name": r.job_name,
+                "started_at": r.started_at.isoformat(),
+                "ok": r.ok,
+                "attempted": r.sources_attempted,
+                "failed": r.sources_failed,
+                "created": r.documents_created,
+                "duration_seconds": r.duration_seconds,
+                "error": r.error,
+            }
+            for r in runs
+        ]
     }
 
 

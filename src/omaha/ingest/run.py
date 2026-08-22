@@ -18,11 +18,12 @@ import httpx
 from sqlalchemy import select
 
 from omaha.config import get_settings
-from omaha.db.models import Document, Source
+from omaha.db.models import Document, JobRun, Source
 from omaha.db.session import session_scope
 from omaha.ingest import store
 from omaha.ingest.fetch import fetch
 from omaha.ingest.parse import parse
+from omaha.ingest.sweep import sweep as run_sweep
 
 settings = get_settings()
 
@@ -103,17 +104,41 @@ def cmd_once(args: argparse.Namespace) -> int:
 
 
 def cmd_sweep(args: argparse.Namespace) -> int:
+    """Cadence-aware by default; --force ignores cadence (never do this on a schedule)."""
     with session_scope() as session:
-        query = select(Source).where(Source.enabled.is_(True))
-        if args.kind:
-            query = query.where(Source.kind == args.kind)
-        sources = session.scalars(query.order_by(Source.name)).all()
-        if not sources:
-            print("no enabled sources")
+        outcome = run_sweep(session, job_name="cli", kind=args.kind, due_only=not args.force)
+    if not outcome.lines:
+        print("nothing due")
+        return 0
+    for line in outcome.lines:
+        print(line)
+    print(
+        f"-- attempted {outcome.attempted}, failed {outcome.failed}, " f"created {outcome.created}"
+    )
+    return 0
+
+
+def cmd_jobs(args: argparse.Namespace) -> int:
+    """Recent scheduled runs."""
+    from sqlalchemy import desc
+
+    with session_scope() as session:
+        runs = session.scalars(
+            select(JobRun).order_by(desc(JobRun.started_at)).limit(args.limit)
+        ).all()
+        if not runs:
+            print("no job runs yet")
             return 0
-        with httpx.Client(timeout=settings.request_timeout_seconds) as client:
-            for source in sources:
-                print(ingest_source(session, source, client=client))
+        for r in runs:
+            dur = f"{r.duration_seconds:.1f}s" if r.duration_seconds is not None else "--"
+            state = "ok" if r.ok else "FAILED"
+            print(
+                f"{r.id:>4}  {r.job_name:<16} {r.started_at.isoformat()}  {state:<7} "
+                f"attempted={r.sources_attempted} failed={r.sources_failed} "
+                f"created={r.documents_created} took={dur}"
+            )
+            if r.error:
+                print(f"      error: {r.error}")
     return 0
 
 
@@ -158,9 +183,14 @@ def main(argv: list[str] | None = None) -> int:
     p_once.add_argument("--name", required=True)
     p_once.set_defaults(func=cmd_once)
 
-    p_sweep = sub.add_parser("sweep", help="ingest every enabled source")
+    p_sweep = sub.add_parser("sweep", help="ingest sources that are due")
     p_sweep.add_argument("--kind", default=None)
+    p_sweep.add_argument("--force", action="store_true", help="ignore cadence and fetch everything")
     p_sweep.set_defaults(func=cmd_sweep)
+
+    p_jobs = sub.add_parser("jobs", help="recent scheduled runs")
+    p_jobs.add_argument("--limit", type=int, default=20)
+    p_jobs.set_defaults(func=cmd_jobs)
 
     p_asof = sub.add_parser("asof", help="what did we know at a point in time?")
     p_asof.add_argument("--name", required=True)
