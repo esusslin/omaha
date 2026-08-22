@@ -12,8 +12,15 @@ migrate:       ## apply migrations
 revision:      ## make a migration: make revision m="add foo"
 	uv run alembic revision --autogenerate -m "$(m)"
 
-dev:           ## run the api
+dev:           ## run the api on the host — search works, but lexical only
 	uv run uvicorn omaha.api:app --reload
+
+# The worker declares no ports, so publish one explicitly rather than --service-ports.
+# SCHEDULER_ENABLED is already false for this service in compose: a demo process should
+# not also be fetching from 32 club sites.
+demo:          ## run the api in the container so /ui has dense retrieval too
+	docker compose --profile worker run --rm -p 8000:8000 worker \
+		uv run uvicorn omaha.api:app --host 0.0.0.0 --port 8000
 
 test:
 	uv run pytest -q

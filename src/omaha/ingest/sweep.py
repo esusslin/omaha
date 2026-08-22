@@ -14,6 +14,7 @@ found, so a missed Wednesday is visible rather than inferred.
 from __future__ import annotations
 
 import datetime as dt
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 import httpx
@@ -170,7 +171,7 @@ def sweep(
     session: Session,
     *,
     job_name: str = "manual",
-    kind: str | None = None,
+    kind: str | Sequence[str] | None = None,
     name: str | None = None,
     due_only: bool = True,
 ) -> SweepOutcome:
@@ -189,7 +190,12 @@ def sweep(
     try:
         query = select(Source).where(Source.enabled.is_(True))
         if kind:
-            query = query.where(Source.kind == kind)
+            # A single kind or several. The injury job needs both `injury_index` and
+            # `injury_report`: when index sources arrived, a job filtered on the old
+            # kind alone silently matched nothing and the Wed/Thu/Fri sweep became a
+            # no-op that still reported success.
+            kinds = [kind] if isinstance(kind, str) else list(kind)
+            query = query.where(Source.kind.in_(kinds))
         if name:
             query = query.where(Source.name == name)
         sources = session.scalars(query.order_by(Source.name)).all()

@@ -25,6 +25,7 @@ from omaha.config import get_settings
 from omaha.db.models import Document, JobRun, Source
 from omaha.db.session import get_session
 from omaha.scheduler import build_scheduler
+from omaha.search_api import router as search_router
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -61,6 +62,8 @@ app = FastAPI(
     description="Document intelligence for NFL prediction. Agents produce evidence, never probabilities.",
     lifespan=lifespan,
 )
+
+app.include_router(search_router)
 
 
 @app.get("/health")
@@ -152,4 +155,10 @@ def jobs(session: DbSession, limit: int = 20) -> dict[str, Any]:
 
 @app.get("/")
 def root() -> dict[str, str]:
-    return {"service": "omaha", "version": "0.1.0"}
+    return {
+        "service": "omaha",
+        "version": "0.1.0",
+        "ui": "/ui",
+        "docs": "/docs",
+        "search": "/search?q=...",
+    }

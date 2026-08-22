@@ -147,6 +147,22 @@ make eval                 # compare lexical / dense / hybrid over the gold set
 make eval-lexical         # host-only, no model needed
 ```
 
+### The demo
+
+```bash
+make demo     # API in the container, so /ui gets dense retrieval
+```
+
+Then open **http://localhost:8000/ui** — a single-file search page with no build step.
+Each result is tagged with which retriever found it (`dense`, `lexical`, or `both`) and
+its rank in each list, so the fusion is visible rather than asserted. `/docs` has the
+OpenAPI schema.
+
+`make dev` runs the same app on the host, where `fastembed` isn't installed. Search
+still works and degrades to lexical, and the response says so — `mode_used`,
+`dense_available`, and a banner on the page. A demo that silently drops half its
+retrieval is worse than one that admits it.
+
 Point-in-time search — the reason the store is bitemporal:
 
 ```bash
