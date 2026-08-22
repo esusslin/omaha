@@ -114,9 +114,7 @@ def cmd_sweep(args: argparse.Namespace) -> int:
         return 0
     for line in outcome.lines:
         print(line)
-    print(
-        f"-- attempted {outcome.attempted}, failed {outcome.failed}, " f"created {outcome.created}"
-    )
+    print(f"-- attempted {outcome.attempted}, failed {outcome.failed}, created {outcome.created}")
     return 0
 
 
