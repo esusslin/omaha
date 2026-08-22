@@ -111,6 +111,14 @@ class Document(Base):
     """When the HTTP request happened."""
 
     content_hash: Mapped[str] = mapped_column(String(64))
+    """SHA-256 of the raw bytes. Identifies exactly what we stored."""
+    text_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    """SHA-256 of the parsed text — what we dedup on.
+
+    Raw bytes are too sensitive: club pages embed build IDs, nonces and rotating tokens,
+    so byte-identical content is rare even when nothing meaningful changed. The parsed
+    text is stable, so it's the right identity for "did this actually change?"
+    """
     raw_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
     """Path to the untouched original."""
 
