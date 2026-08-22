@@ -1,0 +1,21 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    container_name: omaha-postgres
+    environment:
+      POSTGRES_USER: omaha
+      POSTGRES_PASSWORD: omaha_local_dev
+      POSTGRES_DB: omaha
+    ports:
+      - "5433:5432"
+    volumes:
+      - omaha_pgdata:/var/lib/postgresql/data
+      - ./scripts/init_extensions.sql:/docker-entrypoint-initdb.d/01_extensions.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U omaha -d omaha"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  omaha_pgdata:

@@ -1,0 +1,82 @@
+[project]
+name = "omaha"
+version = "0.1.0"
+description = "Document intelligence and agent layer for NFL prediction. Agents produce evidence, never probabilities."
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+authors = [{ name = "Emmet Susslin", email = "esusslin@gmail.com" }]
+
+dependencies = [
+    # web
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "httpx>=0.27",
+    # config
+    "pydantic>=2.9",
+    "pydantic-settings>=2.6",
+    # db
+    "sqlalchemy>=2.0",
+    "alembic>=1.14",
+    "psycopg[binary]>=3.2",
+    "pgvector>=0.3",
+    # scheduling
+    "apscheduler>=3.10,<4",
+    # ingestion
+    # NOTE: docling would be the nicer PDF parser, but it pulls torch, which has no
+    # x86_64 macOS wheels. pdfplumber handles the practice-report tables fine and keeps
+    # local dev installable. Revisit docling on the Linux server if layout gets hairy.
+    "pdfplumber>=0.11",
+    "pypdfium2>=4.30",
+    "trafilatura>=2.0",
+    "feedparser>=6.0",
+    "selectolax>=0.3",
+    # utils
+    "python-dotenv>=1.0",
+    "structlog>=24.4",
+    "tenacity>=9.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.8",
+    "mypy>=1.13",
+    "pre-commit>=4.0",
+    "types-python-dateutil",
+]
+# Phase 2 embedding deps (sentence-transformers, torch) are deliberately NOT here.
+# torch has no x86_64 macOS wheels past 2.2, and embedding runs on the server anyway.
+# See docs/PHASE2.md when we get there.
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/omaha"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "UP", "B", "SIM", "RUF"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+module = ["pdfplumber.*", "trafilatura.*", "feedparser.*", "pgvector.*", "apscheduler.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
