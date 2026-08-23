@@ -14,6 +14,7 @@ writes when content actually changed. A double-fire costs a conditional request.
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -27,15 +28,22 @@ logger = logging.getLogger(__name__)
 EASTERN = ZoneInfo("America/New_York")
 
 
-def _run(job_name: str, kind: str | None) -> None:
+def _run(job_name: str, kind: str | Sequence[str] | None, due_only: bool = True) -> None:
     """Run a sweep in its own session, logging rather than raising.
 
     A scheduler job that raises kills nothing but its own next run — but it also loses
     the outcome, so we catch, log, and let the JobRun row carry the detail.
+
+    `due_only=False` exists for deadline-driven jobs. Cadence gating asks "has enough
+    time passed since the last attempt?", which is right for a polling loop and wrong
+    for a job that fires *because something just happened*. The 17:00 ET injury sweep
+    was gated at 6 hours, so an hourly sweep at 16:07 made it skip everything and write
+    a successful JobRun — a job that exists precisely to catch the 4pm filing deadline,
+    quietly doing nothing on the three days of the week that matter.
     """
     try:
         with session_scope() as session:
-            outcome = sweep(session, job_name=job_name, kind=kind, due_only=True)
+            outcome = sweep(session, job_name=job_name, kind=kind, due_only=due_only)
         logger.info(
             "sweep complete job=%s attempted=%d failed=%d created=%d",
             job_name,
@@ -121,7 +129,8 @@ def build_scheduler() -> BackgroundScheduler:
     scheduler.add_job(
         _run,
         CronTrigger(day_of_week="wed,thu,fri", hour=17, minute=0, timezone=EASTERN),
-        args=["injury_sweep", ["injury_index", "injury_report"]],
+        # due_only=False: fire regardless of cadence. This is the deadline job.
+        args=["injury_sweep", ["injury_index", "injury_report"], False],
         id="injury_sweep",
         max_instances=1,
         coalesce=True,  # a missed fire runs once, not N times
