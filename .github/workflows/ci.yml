@@ -23,6 +23,52 @@ jobs:
       - name: test
         run: uv run pytest -q
 
+  # Retrieval quality, gated. The `check` job above runs the same tests but skips the
+  # database ones, so without this job the retrieval SQL is effectively untested — which
+  # is exactly how a lexical retriever that matched zero rows shipped and stayed shipped.
+  retrieval:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: omaha
+          POSTGRES_PASSWORD: omaha_ci
+          POSTGRES_DB: omaha
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U omaha -d omaha"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      # Note the `+psycopg` dialect suffix. Plain `postgresql://` makes SQLAlchemy reach
+      # for psycopg2, which isn't a dependency, and the failure names a driver nobody
+      # asked for.
+      #
+      # The tests use their own database rather than this one. On CI the distinction is
+      # academic — both are empty — but it's what stops the suite passing here and
+      # failing on a laptop whose database holds the real corpus.
+      OMAHA_TEST_DATABASE_URL: postgresql+psycopg://omaha:omaha_ci@localhost:5432/omaha
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+      - run: uv sync --extra dev
+      - name: retrieval regression
+        run: uv run pytest tests/test_retrieval_regression.py -q
+      - name: fail if the gate silently skipped
+        run: |
+          # A skipped gate is worse than no gate: it reports green forever. This turns a
+          # missing or unreachable database into a build failure instead of a shrug.
+          uv run pytest tests/test_retrieval_regression.py -q 2>&1 | tee result.txt
+          if grep -q "skipped" result.txt; then
+            echo "::error::retrieval tests skipped — OMAHA_TEST_DATABASE_URL unreachable"
+            exit 1
+          fi
+
   secrets:
     runs-on: ubuntu-latest
     steps:
