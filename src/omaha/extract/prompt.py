@@ -14,6 +14,7 @@ table with two generations of output and no way to tell them apart.
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 import re
 from typing import Any
@@ -25,8 +26,16 @@ from omaha.extract.schema import (
     DraftRecord,
 )
 
-EXTRACTOR_VERSION = "v1"
-"""Bump on any prompt change. See the module docstring."""
+EXTRACTOR_VERSION = "v2"
+"""Bump on any prompt change. See the module docstring.
+
+v1 -> v2: publication date supplied as context, and rule 7 added, because `report_day`
+came back on only 55% of records. That field is not decoration — the DNP->LIMITED->FULL
+trajectory across Wednesday, Thursday and Friday is the entire argument for extracting
+prose at all, and a record that doesn't know which day it describes can't be sequenced.
+A model given no date cannot resolve "Wednesday's practice" or "did not practise today",
+and correctly returned null rather than guessing.
+"""
 
 SYSTEM_PROMPT = f"""You extract NFL injury-report facts from text. You return JSON only.
 
@@ -55,6 +64,13 @@ Rules, in order of importance:
 5. If the text contains no injury-report facts at all, return {{"records": []}}.
 6. Be deterministic. This is extraction, not writing: given the same text twice, return
    the same records in the same order. Do not paraphrase, reword or vary phrasing.
+7. Resolve report_day using the publication date when the text refers to a day. Named
+   days map directly ("Thursday's practice" -> THU, "Day: Tuesday" -> TUE). Relative
+   references resolve against the publication date ("did not practise today", in an
+   article published on a Wednesday, -> WED; "returned to practice yesterday" -> the day
+   before). If the text names no day at all, and does not refer to one, use null — do not
+   assume the article describes the day it was published on. Any day of the week is
+   valid: clubs practise Monday and Tuesday in short weeks.
 
 Return only the JSON object. No prose, no code fences."""
 """Rule 6 exists because the SDK removed `temperature` in v1.0 and the documented
@@ -63,16 +79,36 @@ cosmetic here: `extractor_version` is only meaningful if two runs of the same ve
 agree, otherwise comparing v1 against v2 measures noise."""
 
 
-def build_user_prompt(chunk_text: str, *, team_hint: str | None = None) -> str:
+def build_user_prompt(
+    chunk_text: str,
+    *,
+    team_hint: str | None = None,
+    published: dt.datetime | None = None,
+) -> str:
     """The per-chunk message.
 
     `team_hint` carries the team we already know from the document, because a chunk in
-    the middle of an article often names players without repeating the club. It's given
-    as context rather than as an instruction to fill the field — the model is still told
-    to use null when the text doesn't say, and validation checks the value against the
-    32-club vocabulary regardless.
+    the middle of an article often names players without repeating the club.
+
+    `published` is what makes `report_day` resolvable. Club prose says "did not practise
+    today" and "returned Thursday"; without a date, "today" is unanswerable and the model
+    correctly returned null — which is why v1 filled that field on only 55% of records.
+
+    Both are given as *context*, not as instructions to fill a field. The model is still
+    told to use null when the text doesn't say, and validation still checks team against
+    the 32-club vocabulary and report_day against WED/THU/FRI. Supplying a hint that the
+    model is free to ignore is different from supplying a default it will adopt — the
+    second quietly manufactures data.
     """
-    header = f"Source team (context only, may be wrong): {team_hint}\n\n" if team_hint else ""
+    lines = []
+    if team_hint:
+        lines.append(f"Source team (context only, may be wrong): {team_hint}")
+    if published is not None:
+        lines.append(
+            f"Published: {published.strftime('%A %d %B %Y')} "
+            "(use only to resolve day references in the text)"
+        )
+    header = "\n".join(lines) + "\n\n" if lines else ""
     return f"{header}Text:\n---\n{chunk_text}\n---"
 
 

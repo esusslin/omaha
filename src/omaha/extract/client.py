@@ -13,6 +13,7 @@ spent money.
 
 from __future__ import annotations
 
+import datetime as dt
 import logging
 from functools import lru_cache
 from typing import Any
@@ -64,7 +65,12 @@ def _client() -> Any:
     return Anthropic(api_key=settings.anthropic_api_key)
 
 
-def extract(chunk_text: str, *, team_hint: str | None = None) -> list[DraftRecord]:
+def extract(
+    chunk_text: str,
+    *,
+    team_hint: str | None = None,
+    published: dt.datetime | None = None,
+) -> list[DraftRecord]:
     """One chunk in, candidate records out. Unvalidated — the caller must run `validate`.
 
     Returning drafts rather than finished records keeps the network boundary and the
@@ -82,7 +88,12 @@ def extract(chunk_text: str, *, team_hint: str | None = None) -> list[DraftRecor
         model=settings.extract_model,
         max_tokens=MAX_TOKENS,
         system=SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": build_user_prompt(chunk_text, team_hint=team_hint)}],
+        messages=[
+            {
+                "role": "user",
+                "content": build_user_prompt(chunk_text, team_hint=team_hint, published=published),
+            }
+        ],
     )
 
     text = "".join(block.text for block in response.content if getattr(block, "type", "") == "text")

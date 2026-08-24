@@ -83,8 +83,12 @@ def cmd_extract(args: argparse.Namespace) -> int:
             for chunk in chunks:
                 document = chunk.document
                 team = document.team if document else None
+                # `published_time`, not `knowledge_time`: the model is resolving "today"
+                # as the article's author meant it, which is the publication date. When
+                # we happened to fetch it is irrelevant to what day the prose describes.
+                published = document.published_time if document else None
                 try:
-                    drafts = client.extract(chunk.text, team_hint=team)
+                    drafts = client.extract(chunk.text, team_hint=team, published=published)
                 except Exception as exc:
                     # One bad chunk shouldn't end the run. It stays unstamped, so the
                     # next pass retries it.

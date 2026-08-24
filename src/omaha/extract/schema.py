@@ -37,9 +37,25 @@ GAME_STATUSES = ("OUT", "DOUBTFUL", "QUESTIONABLE")
 """Null means *not designated*, which is information — the player was on the report and
 the club chose not to flag him. Distinct from "we didn't look", which is an absent row."""
 
-REPORT_DAYS = ("WED", "THU", "FRI")
-"""Practice reports are filed Wednesday, Thursday and Friday. The trajectory across the
-three is the signal; a single flattened status is not."""
+REPORT_DAYS = ("MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN")
+"""Every day a club might report a practice.
+
+**This was `("WED", "THU", "FRI")` and that was a bug that silently destroyed data.**
+The NFL's *filing deadline* is Wednesday/Thursday/Friday, and I encoded the deadline as
+if it were the set of days clubs practise. It isn't. A Thursday game shifts the week to
+Monday/Tuesday; a team coming off Monday night practises Tuesday; late-season Saturday
+games shift it again. Real rows read `Day: Tuesday`, the model extracted TUE correctly,
+and `_in_vocabulary` threw it away — so `report_day` looked 55% populated and the missing
+45% was blamed first on the model, then on the corpus.
+
+A closed vocabulary is only safe when it is genuinely closed. This one is: there are
+seven days. The earlier version was a *guess about usage* wearing a vocabulary's
+clothing, which is worse than a regex because it fails silently and looks principled.
+
+Trajectory analysis still cares mainly about the Wed→Thu→Fri progression; that belongs in
+the query, not in the ingest, because discarding Tuesday at write time makes the Tuesday
+data unrecoverable.
+"""
 
 MAX_PLAYER_NAME = 128
 MAX_INJURY = 64

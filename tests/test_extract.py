@@ -7,6 +7,8 @@ survive `validate` before it reaches a table, so this file is where the guarante
 
 from __future__ import annotations
 
+import datetime as dt
+
 import pytest
 
 from omaha.extract.prompt import (
@@ -82,6 +84,35 @@ def test_vocabulary_matching_is_case_insensitive() -> None:
     assert record is not None
     assert record.practice_status == "DNP"
     assert record.report_day == "WED"
+
+
+def test_a_tuesday_practice_is_not_thrown_away() -> None:
+    """The regression that cost 443 records their day.
+
+    `REPORT_DAYS` was ("WED","THU","FRI") — the *filing deadline*, encoded as if it were
+    the set of days clubs practise. Real rows read `Day: Tuesday` (Thursday-game weeks,
+    or coming off Monday night). The model extracted TUE correctly and validation
+    discarded it, so the field looked 55% populated and the blame went first to the
+    model and then to the corpus.
+    """
+    record = clean(DraftRecord(player_name="Latu", practice_status="DNP", report_day="TUE"))
+    assert record is not None
+    assert record.report_day == "TUE"
+
+
+def test_every_weekday_is_accepted() -> None:
+    """Seven days is a genuinely closed vocabulary. The previous three-day version was a
+    guess about usage wearing a vocabulary's clothing — worse than a regex, because it
+    failed silently and looked principled."""
+    for day in ("MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"):
+        record = clean(DraftRecord(player_name="Latu", practice_status="FULL", report_day=day))
+        assert record is not None and record.report_day == day, day
+
+
+def test_something_that_is_not_a_day_is_still_rejected() -> None:
+    record = clean(DraftRecord(player_name="Latu", practice_status="FULL", report_day="someday"))
+    assert record is not None
+    assert record.report_day is None
 
 
 def test_a_team_outside_the_league_is_discarded() -> None:
@@ -180,6 +211,37 @@ def test_team_hint_is_context_not_instruction() -> None:
 
 def test_prompt_omits_the_hint_when_there_is_none() -> None:
     assert build_user_prompt("some text").startswith("Text:")
+
+
+def test_publication_date_is_supplied_so_report_day_is_resolvable() -> None:
+    """v1 filled `report_day` on 55% of records because the model had no date.
+
+    Club prose says "did not practise today" and "returned Thursday". Without a
+    publication date "today" is unanswerable, and the model correctly returned null
+    rather than guessing. The day matters: DNP->LIMITED->FULL across Wed/Thu/Fri is the
+    entire argument for extracting prose, and a record that doesn't know its day cannot
+    be sequenced.
+    """
+    import datetime as dt
+
+    prompt = build_user_prompt(
+        "Loudermilk did not practise today.",
+        published=dt.datetime(2025, 12, 17, tzinfo=dt.UTC),  # a Wednesday
+    )
+    assert "Wednesday" in prompt
+    assert "17 December 2025" in prompt
+
+
+def test_the_date_is_context_not_a_default() -> None:
+    """Supplying a hint the model may ignore is different from supplying a default it
+    will adopt. The second manufactures data — every article would get the weekday it
+    was published on, whether or not the text describes that day."""
+    prompt = build_user_prompt("some text", published=dt.datetime(2025, 12, 17, tzinfo=dt.UTC))
+    assert "use only to resolve day references" in prompt
+    # Matched on a phrase that can't straddle a line break — the previous assertion
+    # broke when rule 7 was rewrapped, which is a test failing on formatting rather
+    # than on meaning.
+    assert "describes the day it was published on" in SYSTEM_PROMPT
 
 
 def test_extractor_version_is_set() -> None:
