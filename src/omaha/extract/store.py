@@ -19,7 +19,7 @@ import datetime as dt
 import logging
 from collections.abc import Sequence
 
-from sqlalchemy import select
+from sqlalchemy import case, select
 from sqlalchemy.orm import Session
 
 from omaha.db.models import Chunk, Document, InjuryRecord
@@ -33,15 +33,23 @@ TEAM_VOCABULARY = {club.abbr for club in CLUBS}
 
 
 def pending_chunks(session: Session, version: str, *, limit: int = 50) -> Sequence[Chunk]:
-    """Chunks not yet processed by this extractor version.
+    """Chunks not yet processed by this extractor version, most valuable first.
 
-    Ordered by id so a backfill makes monotonic progress and an interrupted run resumes
-    where it stopped rather than re-drawing a random sample.
+    **Ordering is a cost decision, not a cosmetic one.** Every run is bounded by a batch
+    size, so whatever sorts first is what the budget gets spent on. Ordering by id alone
+    spent the first five calls on a practice-report *legend* and a podcast promo — all
+    correctly returning nothing, all costing the same as a real row.
+
+    `injury_report` documents first, then everything else, then by id within each group
+    so a backfill still makes monotonic progress and an interrupted run resumes rather
+    than re-drawing a random sample.
     """
+    priority = case((Document.doc_type == "injury_report", 0), else_=1)
     statement = (
         select(Chunk)
+        .join(Document, Chunk.document_id == Document.id)
         .where((Chunk.extracted_version.is_(None)) | (Chunk.extracted_version != version))
-        .order_by(Chunk.id)
+        .order_by(priority, Chunk.id)
         .limit(limit)
     )
     return session.scalars(statement).all()

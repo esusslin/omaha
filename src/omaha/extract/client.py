@@ -33,9 +33,24 @@ class ExtractorUnavailableError(RuntimeError):
     """No API key, or the SDK isn't installed."""
 
 
+KEY_PREFIX = "sk-ant-"
+MIN_KEY_LENGTH = 40
+
+
 def available() -> bool:
-    """Can we extract at all? Checked before a run, not during one."""
-    return bool(settings.anthropic_api_key)
+    """Can we extract at all? Checked before a run, not during one.
+
+    Shape-checked rather than merely non-empty, because the first version of this
+    reported "present" for the literal string `sk-ant-...` pasted from a README. A
+    readiness check that passes on a placeholder is worse than no check: it moves the
+    failure from startup, where it's obvious, into the middle of a loop, where it looks
+    like an API problem.
+
+    This can't tell a revoked key from a live one — only the API can — but it catches
+    every version of "I meant to fill that in".
+    """
+    key = settings.anthropic_api_key.strip()
+    return key.startswith(KEY_PREFIX) and len(key) >= MIN_KEY_LENGTH and "..." not in key
 
 
 @lru_cache(maxsize=1)
@@ -56,14 +71,16 @@ def extract(chunk_text: str, *, team_hint: str | None = None) -> list[DraftRecor
     correctness boundary separate: this function can be wrong about what the model said,
     and validation is still the thing that decides what gets stored.
 
-    Temperature 0 because this is extraction, not writing. Two runs over the same chunk
-    should agree, otherwise `extractor_version` means nothing and comparing versions
-    measures sampling noise.
+    **No `temperature`.** This wanted temperature 0 — extraction should be reproducible,
+    or `extractor_version` means nothing and comparing two versions measures sampling
+    noise. But the anthropic SDK removed `temperature`, `top_p` and `top_k` from the
+    Messages methods in v1.0, and the documented replacement is to ask for the behaviour
+    in the system prompt, which `SYSTEM_PROMPT` now does. Passing it raises TypeError
+    before any request is made, so this fails loudly rather than silently sampling.
     """
     response = _client().messages.create(
         model=settings.extract_model,
         max_tokens=MAX_TOKENS,
-        temperature=0,
         system=SYSTEM_PROMPT,
         messages=[{"role": "user", "content": build_user_prompt(chunk_text, team_hint=team_hint)}],
     )

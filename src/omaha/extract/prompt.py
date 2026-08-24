@@ -53,8 +53,14 @@ Rules, in order of importance:
 4. One record per player per distinct report day. If a passage describes a player on
    Wednesday and again on Friday, that is two records.
 5. If the text contains no injury-report facts at all, return {{"records": []}}.
+6. Be deterministic. This is extraction, not writing: given the same text twice, return
+   the same records in the same order. Do not paraphrase, reword or vary phrasing.
 
 Return only the JSON object. No prose, no code fences."""
+"""Rule 6 exists because the SDK removed `temperature` in v1.0 and the documented
+replacement for sampling control is a system-prompt instruction. Reproducibility isn't
+cosmetic here: `extractor_version` is only meaningful if two runs of the same version
+agree, otherwise comparing v1 against v2 measures noise."""
 
 
 def build_user_prompt(chunk_text: str, *, team_hint: str | None = None) -> str:

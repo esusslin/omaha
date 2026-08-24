@@ -7,7 +7,14 @@ survive `validate` before it reaches a table, so this file is where the guarante
 
 from __future__ import annotations
 
-from omaha.extract.prompt import EXTRACTOR_VERSION, build_user_prompt, parse_response
+import pytest
+
+from omaha.extract.prompt import (
+    EXTRACTOR_VERSION,
+    SYSTEM_PROMPT,
+    build_user_prompt,
+    parse_response,
+)
 from omaha.extract.schema import DraftRecord, is_grounded, validate
 
 TEAMS = {"PHI", "SF", "PIT", "ATL", "WAS"}
@@ -179,3 +186,33 @@ def test_extractor_version_is_set() -> None:
     """Stamped on every row. Without it the table holds two generations of output with
     no way to tell them apart, and "did v2 beat v1?" becomes unanswerable."""
     assert EXTRACTOR_VERSION
+
+
+def test_the_prompt_asks_for_determinism() -> None:
+    """The SDK removed `temperature` in v1.0, so sampling control lives in the prompt
+    now. Reproducibility isn't cosmetic: comparing extractor versions is meaningless if
+    two runs of the *same* version disagree."""
+    assert "deterministic" in SYSTEM_PROMPT.lower()
+
+
+# --- readiness ----------------------------------------------------------------------
+
+
+def test_a_placeholder_key_does_not_report_ready(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`available()` once returned True for the literal string pasted out of a README.
+
+    A readiness check that passes on a placeholder is worse than none — it moves the
+    failure from startup, where it's obvious, into the middle of a loop, where it looks
+    like an API outage."""
+    from omaha.extract import client
+
+    for placeholder in ("", "   ", "sk-ant-...", "your-key-here", "sk-ant-short"):
+        monkeypatch.setattr(client.settings, "anthropic_api_key", placeholder)
+        assert not client.available(), f"{placeholder!r} should not report ready"
+
+
+def test_a_plausible_key_reports_ready(monkeypatch: pytest.MonkeyPatch) -> None:
+    from omaha.extract import client
+
+    monkeypatch.setattr(client.settings, "anthropic_api_key", "sk-ant-" + "a" * 60)
+    assert client.available()

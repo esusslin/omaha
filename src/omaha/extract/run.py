@@ -66,33 +66,50 @@ def cmd_extract(args: argparse.Namespace) -> int:
         return 1
 
     processed = written = failed = 0
-    with session_scope() as session:
-        chunks = store.pending_chunks(session, EXTRACTOR_VERSION, limit=args.limit)
-        if not chunks:
-            print("nothing pending")
-            return 0
+    remaining = args.limit
 
-        for chunk in chunks:
-            document = chunk.document
-            try:
-                drafts = client.extract(chunk.text, team_hint=document.team if document else None)
-            except Exception as exc:
-                # One bad chunk shouldn't end the run. It stays unstamped, so the next
-                # pass retries it — the same resumability that makes embedding safe to
-                # interrupt.
-                failed += 1
-                print(f"  chunk {chunk.id}: {type(exc).__name__}: {exc}", file=sys.stderr)
-                continue
+    # **Checkpoint every `--batch` chunks.** The first version of this held one
+    # transaction open for the whole run, so a 1,173-chunk backfill was all-or-nothing:
+    # any interruption rolled back every record while the API calls stayed paid for.
+    # Committing in batches means a failure costs one batch, and the stamped chunks mean
+    # the next invocation picks up where this one stopped.
+    while remaining > 0:
+        size = min(args.batch, remaining)
+        with session_scope() as session:
+            chunks = store.pending_chunks(session, EXTRACTOR_VERSION, limit=size)
+            if not chunks:
+                break
 
-            count = store.persist(session, chunk, drafts, version=EXTRACTOR_VERSION)
-            processed += 1
-            written += count
-            if args.verbose and count:
-                print(f"  chunk {chunk.id}: {count} records")
+            for chunk in chunks:
+                document = chunk.document
+                team = document.team if document else None
+                try:
+                    drafts = client.extract(chunk.text, team_hint=team)
+                except Exception as exc:
+                    # One bad chunk shouldn't end the run. It stays unstamped, so the
+                    # next pass retries it.
+                    failed += 1
+                    print(f"  chunk {chunk.id}: {type(exc).__name__}: {exc}", file=sys.stderr)
+                    continue
 
-        session.flush()
+                count = store.persist(session, chunk, drafts, version=EXTRACTOR_VERSION)
+                processed += 1
+                written += count
+                if args.verbose and count:
+                    print(f"  chunk {chunk.id}: {count} records")
 
-    print(f"processed {processed}, records {written}, failed {failed}")
+            session.flush()
+
+        remaining -= len(chunks)
+        # Printed after the commit, so the number reported is the number that's durable.
+        # A progress line that runs ahead of the transaction is a lie you'll believe.
+        print(f"  ...{processed} processed, {written} records, {failed} failed", flush=True)
+
+        if failed and processed == 0:
+            print("every chunk in the first batch failed — stopping", file=sys.stderr)
+            break
+
+    print(f"\nprocessed {processed}, records {written}, failed {failed}")
     print(f"est. spend ${estimate_cost(processed):.3f}")
     return 0
 
@@ -192,7 +209,13 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("status", help="pending count and estimated cost").set_defaults(func=cmd_status)
 
     p_ex = sub.add_parser("extract", help="extract records from pending chunks")
-    p_ex.add_argument("--limit", type=int, default=25)
+    p_ex.add_argument("--limit", type=int, default=25, help="total chunks this run")
+    p_ex.add_argument(
+        "--batch",
+        type=int,
+        default=25,
+        help="commit every N chunks, so an interruption costs a batch and not the run",
+    )
     p_ex.add_argument("--verbose", action="store_true")
     p_ex.set_defaults(func=cmd_extract)
 
