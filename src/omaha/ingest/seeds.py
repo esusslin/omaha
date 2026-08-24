@@ -76,6 +76,36 @@ CLUBS: tuple[Club, ...] = (
 INDEX_CADENCE_SECONDS = 6 * 60 * 60
 
 
+# Clubs whose CMS doesn't behave like the other thirty. Keyed by (abbr, kind), valued by
+# the reason, because "why is this missing?" is a question someone asks six months later
+# and an empty dict entry doesn't answer.
+#
+# Recorded rather than worked around. Detroit's 404 is a decision on their side about
+# who may fetch that path; sending a browser user-agent to get past it would be evading
+# a stated preference, which is a different act from reading a public page. Two of
+# sixty-four sources isn't worth that, and neither club is among the four that actually
+# curate an archive.
+UNAVAILABLE: dict[tuple[str, str], str] = {
+    ("DAL", "transactions"): (
+        "no such page — the club's Team nav lists roster, depth chart, coaches, "
+        "executives, stats, injury report and standings, and no transactions section"
+    ),
+    ("DET", "injury_index"): (
+        "HTTP 404 for our user-agent, with and without the trailing slash. The same "
+        "user-agent fetches det-transactions on the same domain successfully, so this "
+        "is a per-path rule rather than a block on the client"
+    ),
+}
+
+
+def is_available(abbr: str, kind: str) -> bool:
+    return (abbr, kind) not in UNAVAILABLE
+
+
+def unavailable_reason(abbr: str, kind: str) -> str | None:
+    return UNAVAILABLE.get((abbr, kind))
+
+
 @dataclass(frozen=True)
 class SourceSeed:
     name: str
@@ -86,7 +116,7 @@ class SourceSeed:
 
 
 def injury_index_seeds() -> list[SourceSeed]:
-    """One index source per club."""
+    """One index source per club, minus the ones known not to serve us."""
     return [
         SourceSeed(
             name=f"{club.abbr.lower()}-injury-index",
@@ -96,6 +126,7 @@ def injury_index_seeds() -> list[SourceSeed]:
             cadence_seconds=INDEX_CADENCE_SECONDS,
         )
         for club in CLUBS
+        if is_available(club.abbr, "injury_index")
     ]
 
 
@@ -109,7 +140,24 @@ def transaction_seeds() -> list[SourceSeed]:
             cadence_seconds=INDEX_CADENCE_SECONDS,
         )
         for club in CLUBS
+        if is_available(club.abbr, "transactions")
     ]
+
+
+def unavailable_source_names() -> dict[str, str]:
+    """Source name -> reason, for sources that should exist but can't be fetched.
+
+    Seeding skips them; `run seed` uses this to disable any that were registered before
+    the exception was known. Left in the table rather than deleted so `/health` can say
+    "known unavailable" instead of the source silently vanishing — a source that
+    disappears looks like it was never wanted.
+    """
+    suffix = {"injury_index": "injury-index", "transactions": "transactions"}
+    return {
+        f"{abbr.lower()}-{suffix[kind]}": reason
+        for (abbr, kind), reason in UNAVAILABLE.items()
+        if kind in suffix
+    }
 
 
 def all_seeds() -> list[SourceSeed]:

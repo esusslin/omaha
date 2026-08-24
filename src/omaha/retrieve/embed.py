@@ -57,7 +57,8 @@ def embed_passages(texts: Sequence[str]) -> list[list[float]]:
 
 def embed_query(text: str) -> list[float]:
     """Embed a search query. Prefixed, per BGE's training."""
-    return next(iter(_model().query_embed([text]))).tolist()
+    vector: list[float] = next(iter(_model().query_embed([text]))).tolist()
+    return vector
 
 
 def pending_chunks(session: Session, *, limit: int = 500) -> Sequence[Chunk]:

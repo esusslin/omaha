@@ -15,10 +15,10 @@ import datetime as dt
 import sys
 
 from omaha.db.session import session_scope
-from omaha.retrieve.search import hybrid_search
+from omaha.retrieve.search import EmbedQueryFn, hybrid_search
 
 
-def _embedder():
+def _embedder() -> EmbedQueryFn | None:
     try:
         from omaha.retrieve.embed import embed_query
 

@@ -13,9 +13,11 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import sys
+from typing import Any
 
 import httpx
 from sqlalchemy import select
+from sqlalchemy.orm import Session
 
 from omaha.config import get_settings
 from omaha.db.models import Document, JobRun, Source
@@ -28,7 +30,7 @@ from omaha.ingest.sweep import sweep as run_sweep
 settings = get_settings()
 
 
-def ingest_source(session, source: Source, client: httpx.Client | None = None) -> str:
+def ingest_source(session: Session, source: Source, client: httpx.Client | None = None) -> str:
     """Fetch, parse and store one source. Returns a one-line status for the console."""
     result = fetch(source.url, etag=source.etag, last_modified=source.last_modified, client=client)
 
@@ -149,9 +151,9 @@ def cmd_seed(args: argparse.Namespace) -> int:
     because that page's table is client-rendered: it fetches 200, parses to the legend,
     and reports healthy forever while storing nothing.
     """
-    from omaha.ingest.seeds import all_seeds
+    from omaha.ingest.seeds import all_seeds, unavailable_source_names
 
-    added = skipped = retired = 0
+    added = skipped = retired = disabled = 0
     with session_scope() as session:
         for seed in all_seeds():
             existing = session.scalars(select(Source).where(Source.name == seed.name)).first()
@@ -182,9 +184,20 @@ def cmd_seed(args: argparse.Namespace) -> int:
                 source.last_error = "disabled: injury table is client-rendered, use the index"
                 retired += 1
 
+        # Sources registered before we learned the club doesn't serve them. Disabled
+        # rather than deleted, and carrying the reason, so /health reports a known
+        # exception instead of an unexplained absence — and so `consecutive_failures`
+        # stops climbing on something nobody intends to fix.
+        for name, reason in unavailable_source_names().items():
+            registered = session.scalars(select(Source).where(Source.name == name)).first()
+            if registered is not None and registered.enabled:
+                registered.enabled = False
+                registered.last_error = f"disabled: {reason}"
+                disabled += 1
+
         session.flush()
 
-    print(f"added {added}, already present {skipped}, retired {retired}")
+    print(f"added {added}, already present {skipped}, retired {retired}, disabled {disabled}")
     return 0
 
 
@@ -262,7 +275,7 @@ def cmd_reparse(args: argparse.Namespace) -> int:
             # Count rows, not tables. The prose extractor always emits exactly one
             # table, so comparing table counts reports "unchanged" no matter how much
             # the extraction improved — which is worse than no metric at all.
-            def _rows(tables: list[dict] | None) -> int:
+            def _rows(tables: list[dict[str, Any]] | None) -> int:
                 return sum(len(t.get("rows", [])) for t in (tables or []))
 
             before = (document.text_hash, _rows((document.parsed_tables or {}).get("tables")))

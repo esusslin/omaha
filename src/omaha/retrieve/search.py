@@ -25,12 +25,18 @@ from __future__ import annotations
 import datetime as dt
 import re
 from collections import defaultdict
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
+from typing import Any
 
 from sqlalchemy import Select, desc, func, select
 from sqlalchemy.orm import Session
+from sqlalchemy.sql.elements import ColumnElement
 
 from omaha.db.models import Chunk, Document
+
+EmbedQueryFn = Callable[[str], Sequence[float]]
+"""Injected rather than imported. See `hybrid_search` for why."""
 
 # RRF's only knob. 60 is the value from Cormack et al. (2009) and is deliberately left
 # alone: the point of RRF is that it works without tuning, and a k fitted to 30 questions
@@ -69,7 +75,7 @@ class SearchHit:
         return "lexical"
 
 
-def _base_query(as_of: dt.datetime | None) -> Select:
+def _base_query(as_of: dt.datetime | None) -> Select[tuple[Chunk, Document]]:
     """Chunks joined to their document, optionally restricted to what we knew by then.
 
     The filter is on `knowledge_time` — when *we* learned it — not `published_time`.
@@ -98,12 +104,17 @@ def _to_hit(chunk: Chunk, document: Document) -> SearchHit:
 
 def dense_search(
     session: Session,
-    query_vector: list[float],
+    query_vector: Sequence[float],
     *,
     limit: int = DEFAULT_CANDIDATES,
     as_of: dt.datetime | None = None,
 ) -> list[SearchHit]:
-    """Nearest neighbours by cosine distance, via the HNSW index."""
+    """Nearest neighbours by cosine distance, via the HNSW index.
+
+    `Sequence[float]` rather than `list[float]`: callers pass whatever the embedder
+    returns, and pinning the concrete type here forces a copy at every call site for no
+    benefit — nothing in this function mutates the vector.
+    """
     statement = (
         _base_query(as_of)
         .where(Chunk.embedding.is_not(None))
@@ -116,7 +127,7 @@ def dense_search(
 _WORD = re.compile(r"[A-Za-z0-9][A-Za-z0-9'\u2019.-]*")
 
 
-def build_or_tsquery(query_text: str):
+def build_or_tsquery(query_text: str) -> ColumnElement[Any] | None:
     """An OR-of-terms tsquery, or None if the query has no usable words.
 
     **This is the whole ballgame for lexical retrieval, and getting it wrong is silent.**
@@ -139,7 +150,7 @@ def build_or_tsquery(query_text: str):
     if not terms:
         return None
 
-    combined = None
+    combined: ColumnElement[Any] | None = None
     for term in terms:
         part = func.websearch_to_tsquery("english", term)
         combined = part if combined is None else combined.op("||")(part)
@@ -215,7 +226,7 @@ def hybrid_search(
     limit: int = DEFAULT_TOP_K,
     candidates: int = DEFAULT_CANDIDATES,
     as_of: dt.datetime | None = None,
-    embed_query_fn=None,
+    embed_query_fn: EmbedQueryFn | None = None,
 ) -> list[SearchHit]:
     """Dense + lexical, fused.
 

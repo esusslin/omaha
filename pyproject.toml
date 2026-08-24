@@ -84,7 +84,18 @@ warn_unused_configs = true
 plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
-module = ["pdfplumber.*", "trafilatura.*", "feedparser.*", "pgvector.*", "apscheduler.*"]
+# Third-party packages that ship no type stubs. `fastembed` additionally isn't installed
+# on the host at all — it lives behind the `embed` extra and only builds on Linux — so
+# without this every host-side typecheck fails on an import that is *designed* to be
+# absent. See `search_api.get_embedder` for how that absence is handled at runtime.
+module = [
+    "pdfplumber.*",
+    "trafilatura.*",
+    "feedparser.*",
+    "pgvector.*",
+    "apscheduler.*",
+    "fastembed.*",
+]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

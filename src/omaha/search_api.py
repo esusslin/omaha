@@ -27,6 +27,8 @@ from sqlalchemy.orm import Session
 from omaha.db.session import get_session
 from omaha.retrieve.search import (
     DEFAULT_CANDIDATES,
+    EmbedQueryFn,
+    SearchHit,
     dense_search,
     hybrid_search,
     lexical_search,
@@ -40,7 +42,7 @@ router = APIRouter()
 
 
 @lru_cache(maxsize=1)
-def get_embedder():
+def get_embedder() -> EmbedQueryFn | None:
     """The query embedder, or None where the model isn't installed.
 
     Cached so the ONNX weights load once per process. Returning None instead of raising
@@ -57,7 +59,7 @@ def get_embedder():
         return None
 
 
-def _serialise(hit) -> dict[str, Any]:
+def _serialise(hit: SearchHit) -> dict[str, Any]:
     return {
         "chunk_id": hit.chunk_id,
         "document_id": hit.document_id,
@@ -109,7 +111,10 @@ def search(
 
     if effective == "lexical":
         hits = lexical_search(session, q, limit=limit, as_of=when)
-    elif effective == "dense":
+    elif effective == "dense" and embedder is not None:
+        # The `is not None` is redundant at runtime — the block above already downgraded
+        # dense to lexical when there's no model — but mypy can't follow that across two
+        # statements, and an `assert` would be a runtime cost for a compile-time problem.
         hits = dense_search(session, embedder(q), limit=limit, as_of=when)
     else:
         hits = hybrid_search(

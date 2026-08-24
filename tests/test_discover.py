@@ -15,7 +15,13 @@ from omaha.ingest.discover import (
     extract_published_time,
     parse_display_date,
 )
-from omaha.ingest.seeds import CLUBS, all_seeds, injury_index_seeds
+from omaha.ingest.seeds import (
+    CLUBS,
+    UNAVAILABLE,
+    all_seeds,
+    injury_index_seeds,
+    unavailable_source_names,
+)
 
 BASE = "https://www.philadelphiaeagles.com/team/injury-report/"
 
@@ -166,9 +172,43 @@ def test_index_seeds_are_index_kind() -> None:
     """Kind drives sweep routing — if these register as `injury_report` they get
     treated as documents and quietly collect the page legend."""
     seeds = injury_index_seeds()
-    assert len(seeds) == 32
+    assert len(seeds) == 32 - sum(1 for _, kind in UNAVAILABLE if kind == "injury_index")
     assert {s.kind for s in seeds} == {"injury_index"}
 
 
 def test_index_cadence_is_not_hourly() -> None:
     assert all(s.cadence_seconds >= 3600 for s in all_seeds())
+
+
+def test_unavailable_clubs_are_not_seeded() -> None:
+    """Two clubs don't serve what the shared CMS implies they should: Dallas has no
+    transactions page at all, and Detroit returns 404 for our user-agent on the injury
+    index. Seeding them anyway means two sources whose `consecutive_failures` climb
+    forever and two red rows on `/health` that nobody intends to fix — which trains you
+    to ignore the endpoint."""
+    names = {s.name for s in all_seeds()}
+    assert "dal-transactions" not in names
+    assert "det-injury-index" not in names
+
+    # ...but the clubs are still covered for everything that does work.
+    assert "dal-injury-index" in names
+    assert "det-transactions" in names
+
+
+def test_every_exception_carries_a_reason() -> None:
+    """An exceptions table without reasons is folklore. Six months from now the question
+    is 'why is Dallas missing?', and the answer has to live next to the exclusion."""
+    assert all(reason.strip() for reason in UNAVAILABLE.values())
+    assert all(len(reason) > 30 for reason in UNAVAILABLE.values())
+
+
+def test_unavailable_names_match_real_seed_names() -> None:
+    """`unavailable_source_names()` drives the disable step in `run seed`, so a typo
+    there is silent: the stale source stays enabled and keeps failing. This pins the
+    naming convention to the one the seeds actually use."""
+    from omaha.ingest.seeds import CLUBS as _CLUBS
+
+    all_possible = {f"{club.abbr.lower()}-injury-index" for club in _CLUBS} | {
+        f"{club.abbr.lower()}-transactions" for club in _CLUBS
+    }
+    assert set(unavailable_source_names()) <= all_possible

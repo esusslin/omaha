@@ -13,10 +13,14 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from typing import Any
+
+from sqlalchemy.orm import Session
 
 from omaha.db.session import session_scope
 from omaha.eval.score import Report, evaluate_one
 from omaha.retrieve.search import (
+    EmbedQueryFn,
     dense_search,
     hybrid_search,
     lexical_search,
@@ -24,15 +28,20 @@ from omaha.retrieve.search import (
 
 GOLD_PATH = Path("data/gold/injury_questions.json")
 
+GoldQuestion = dict[str, Any]
+"""One gold entry: `id`, `question`, `must_contain`. Loose on purpose — the gold set is
+data, and pinning it to a dataclass means editing code to add a field to a JSON file."""
 
-def load_gold(path: Path) -> list[dict]:
+
+def load_gold(path: Path) -> list[GoldQuestion]:
     if not path.exists():
         print(f"no gold set at {path}", file=sys.stderr)
         raise SystemExit(1)
-    return json.loads(path.read_text())["questions"]
+    questions: list[GoldQuestion] = json.loads(path.read_text())["questions"]
+    return questions
 
 
-def _embedder():
+def _embedder() -> EmbedQueryFn | None:
     """The embedding model, or None on a host where it isn't installed.
 
     Returning None rather than raising lets lexical evaluation run anywhere, which is
@@ -48,7 +57,13 @@ def _embedder():
         return None
 
 
-def run_mode(session, questions: list[dict], mode: str, limit: int, embed_fn) -> Report:
+def run_mode(
+    session: Session,
+    questions: list[GoldQuestion],
+    mode: str,
+    limit: int,
+    embed_fn: EmbedQueryFn | None,
+) -> Report:
     results = []
 
     for entry in questions:
