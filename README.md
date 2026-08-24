@@ -2,8 +2,117 @@
 
 *The call you make at the line, after you see what's actually in front of you.*
 
-Document intelligence for NFL prediction — ingestion, hybrid retrieval, and evaluated LLM
-extraction over the text that structured feeds throw away.
+**Omaha reads what NFL teams write about their injured players, and turns it into data.**
+
+Every week each club publishes an injury report. The structured version everyone uses is
+one word per player — `Out`, `Doubtful`, `Questionable`. The reports themselves say much
+more: who practised on Wednesday and who didn't, whether a player was limited on Thursday
+and full on Friday, what the coach said about a game-time decision. That detail is written
+in prose and in HTML tables that no feed bothers to parse, so it gets thrown away.
+
+Omaha collects those reports automatically, three times a week, from all 32 clubs. It
+keeps every version rather than overwriting — so you can ask *"what did we know at 5pm on
+Friday?"* and get Friday's answer, not today's. Then it turns the text into rows a program
+can use: player, team, injury, whether he practised, what the club designated him.
+
+### Why the detail matters
+
+Take a player listed **Questionable**. That single word covers a wide range:
+
+| what the reports show | how often he actually played |
+|---|---|
+| didn't practise all week | **30%** |
+| practised on a limited basis | **50%** |
+| practised fully | **55%** |
+
+Same label, wildly different outcomes — and the difference is sitting in text that the
+structured feed discards. Measured across 90,467 injury records from 2009–2025.
+
+### How often it updates
+
+Collection is automatic and runs on the league's clock, not a convenient one. NFL rules
+require practice reports by **4:00pm Eastern on Wednesday, Thursday and Friday**, so:
+
+| what | when | why that time |
+|---|---|---|
+| Practice reports | **17:00 ET, Wed / Thu / Fri** | An hour after the filing deadline, to catch late filers |
+| Article discovery | Hourly | Clubs publish reports as news articles; this finds new ones |
+| Transactions, signings, IR moves | Hourly | These land at no fixed time |
+| Chunking, embedding, extraction | Hourly, at :25 | Runs against whatever the sweeps just collected |
+
+Scheduled in `America/New_York` rather than UTC, deliberately — a UTC schedule drifts an
+hour across daylight saving and lands wrong in November, which is exactly when injury
+reports start mattering.
+
+Nothing here needs a human. It has been running unattended since deployment, and
+[`/health`](https://omaha-production-17e9.up.railway.app/health) reports which of its 62
+sources are overdue rather than just saying the server is up.
+
+### How you'd actually use it
+
+**As a JSON API.** Every endpoint is a plain GET, no auth, no SDK.
+
+```bash
+# who's on Philadelphia's report right now
+curl 'https://omaha-production-17e9.up.railway.app/injuries?team=PHI'
+
+# one player's week: DNP Wednesday, limited Thursday, full Friday?
+curl 'https://omaha-production-17e9.up.railway.app/injuries/trajectory?team=PHI&player=Carter'
+
+# what was knowable at 5pm on a Friday last December — not what we know now
+curl 'https://omaha-production-17e9.up.railway.app/injuries?team=PHI&as_of=2025-12-19T22:00:00Z'
+
+# ask a question in English
+curl 'https://omaha-production-17e9.up.railway.app/search?q=which+lineman+is+hurt'
+```
+
+**As a tool an agent can call.** This is the design it was built for. The output is typed,
+every field is nullable, and every record carries the sentence it came from — so a
+language model can cite rather than assert, and a missing value is visibly missing rather
+than quietly zero. It's read-only by construction: there is no endpoint here that writes
+anything, which is what makes it safe to hand to an autonomous system.
+
+The response also tells a caller **how much to trust an empty answer**, which is the part
+most data sources get wrong:
+
+```jsonc
+{ "knowledge": "complete" }   // sources fresh — no records means he's healthy
+{ "knowledge": "unknown"  }   // collection is broken — no records means nothing at all
+```
+
+An agent that can't tell those apart will confidently report a player fit when in fact
+nobody has checked. That distinction is why this exists as a service rather than a table.
+
+**As a feature source for a model.** Practice trajectory feeds a `P(player is active)`
+layer directly. Because storage is point-in-time, a backtest can be run honestly — you
+get what was knowable then, not what's known now.
+
+### Who this is for
+
+- **Sports betting.** Player props live and die on whether someone takes the field. A
+  quarterback ruled out at 4pm Friday moves a total by several points; knowing on
+  Wednesday that he hasn't practised is worth more than knowing on Sunday morning.
+- **Fantasy football.** The Thursday and Friday practice reports are the difference
+  between starting a player and burning a bench slot. Omaha gives you the trajectory —
+  `DNP → LIMITED → FULL` — rather than a single status that flattens it.
+- **Research and modelling.** Because every fact is stored with *when we learned it*, you
+  can rebuild what was knowable at any past moment. That's what makes it usable for
+  backtesting instead of only for a live dashboard — a model trained on data it couldn't
+  have had at the time will look brilliant and lose money.
+- **Journalism and analysis.** Every extracted fact carries the sentence it came from and
+  a link to the club's own page. Nothing is asserted without a citation.
+
+### What it doesn't do
+
+It doesn't predict anything, pick anything, or tell you what to bet. It reads documents
+and produces cited facts. The prediction system that consumes those facts is a separate,
+private project — and this repository deliberately contains no model, no strategy and no
+edge.
+
+---
+
+Technically: ingestion, bitemporal storage, hybrid retrieval, and evaluated LLM extraction
+over the text that structured feeds throw away. Details below.
 
 ## Try it
 
