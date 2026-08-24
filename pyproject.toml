@@ -31,6 +31,8 @@ dependencies = [
     "trafilatura>=2.0",
     "feedparser>=6.0",
     "selectolax>=0.3",
+    # extraction (Phase 4) — pure python, no ML wheels, so it installs on the host too
+    "anthropic>=0.40",
     # utils
     "python-dotenv>=1.0",
     "structlog>=24.4",

@@ -32,6 +32,19 @@ class Settings(BaseSettings):
     # what a club CDN notices, and the whole backfill is still bounded by article count.
     min_request_interval_seconds: float = 1.0
 
+    # --- extraction (Phase 4) ---
+    anthropic_api_key: str = ""
+    """Empty means extraction is unavailable and the pipeline says so rather than
+    failing mid-batch. Same shape as the embedding model being absent on the host."""
+    extract_model: str = "claude-haiku-4-5-20251001"
+    """Haiku: the task is span extraction against a fixed schema, not reasoning. At
+    roughly two dollars for a full-corpus pass, re-running after a prompt change is
+    cheap enough that `extractor_version` is a usable iteration loop rather than a
+    ceremony."""
+    extract_batch_size: int = 50
+    """Chunks per scheduled run. Bounds the cost and the wall time of a single job so a
+    backfill can't monopolise the hourly slot."""
+
     # staleness thresholds, in seconds, used by /health
     # a source overdue by more than this reports ok=false
     staleness_grace_seconds: int = 3600 * 6

@@ -169,6 +169,18 @@ class Chunk(Base):
     old, switch reads, then drop. Impossible if the vector has no provenance."""
     embedded_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
+    # --- extraction (Phase 4) ---
+    extracted_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    """Which extractor has *processed* this chunk — not whether it produced records.
+
+    The distinction matters and costs money if you get it wrong. Plenty of chunks are
+    boilerplate, quotes or schedule tables and legitimately yield zero facts. If "has
+    records" were the test for "needs extracting", every one of those would be re-sent
+    to the API on every hourly run, forever, to rediscover that there's nothing there.
+
+    Same pattern as `embedding_version`: stamped per row, so bumping the extractor makes
+    the corpus pending again and leaves the old output in place for comparison."""
+
     tsv: Mapped[str | None] = mapped_column(
         TSVECTOR,
         Computed("to_tsvector('english', text)", persisted=True),
@@ -181,6 +193,95 @@ class Chunk(Base):
     couldn't query it, which is why hybrid search needed it added here rather than in a
     new migration. Nothing changes in the database.
     """
+
+
+class InjuryRecord(Base):
+    """A typed fact extracted from a chunk. Phase 4.
+
+    **Why this table exists.** Retrieval returns passages, and a passage is evidence, not
+    data. `the-algo` cannot consume "TE Cameron Latu (Ankle) | Practice: LIMITED" — it
+    needs a row it can join and feed to a model. This is that row.
+
+    **Derived, never authoritative.** Every record points at the chunk it came from, and
+    the chunk points at the document, and the document keeps the original bytes. Nothing
+    here is a source of truth; the whole table can be dropped and rebuilt from `chunks`
+    without a single HTTP request. That property is the direct lesson of `reparse` —
+    extraction frozen at ingest meant improving a parser silently changed nothing, three
+    times in a row, before anyone noticed.
+
+    **`knowledge_time` is inherited, never recomputed.** It comes from the parent
+    document. An extraction run in March must not make a December fact look like it was
+    known in March — that's the leakage the whole store exists to prevent, and it would
+    be trivially easy to reintroduce here by stamping `now()`.
+
+    **Every field is nullable on purpose.** The model returns null for anything it can't
+    ground in the chunk text. A missing practice status shows up honestly in coverage
+    statistics; a hallucinated one silently corrupts the feature that the measured
+    +0.0297 AUC result depends on. A wrong value is worse than a missing one, and never
+    more so than here.
+    """
+
+    __tablename__ = "injury_records"
+    __table_args__ = (
+        # One record per player per chunk per extractor version. Re-running an unchanged
+        # extractor is then a no-op rather than a duplicate, which is what makes the job
+        # safe to fire hourly.
+        UniqueConstraint(
+            "chunk_id", "player_name", "extractor_version", name="uq_record_chunk_player"
+        ),
+        Index("ix_records_team_knowledge", "team", "knowledge_time"),
+        Index("ix_records_player", "player_name"),
+        # The query the scheduler runs every hour: what hasn't been extracted yet?
+        Index("ix_records_version", "extractor_version"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+
+    chunk_id: Mapped[int] = mapped_column(ForeignKey("chunks.id", ondelete="CASCADE"))
+    chunk: Mapped[Chunk] = relationship()
+    document_id: Mapped[int] = mapped_column(ForeignKey("documents.id", ondelete="CASCADE"))
+    """Denormalised from the chunk so team/date queries don't need a three-table join."""
+
+    # --- the fact ---
+    player_name: Mapped[str] = mapped_column(String(128))
+    """As written in the source. Normalisation is a separate concern with its own
+    failure modes, and conflating the two makes both harder to measure."""
+    player_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    """Resolved identity, once a crosswalk exists. Null until then — and null is honest:
+    "T.J. Watt", "TJ Watt" and "Watt, T.J." are one player and guessing which costs more
+    than admitting we haven't joined them yet."""
+
+    team: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    position: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    injury: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+    practice_status: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    """DNP | LIMITED | FULL. Validated against a closed set before insert — the same
+    discipline as team headings, for the same reason: a value outside the vocabulary is
+    a bug, not a discovery."""
+    game_status: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    """OUT | DOUBTFUL | QUESTIONABLE | null. Null means not designated, which is itself
+    information and must not be confused with "we didn't look"."""
+    report_day: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    """Wed | Thu | Fri. The trajectory across these three is the signal; a single
+    flattened status is not."""
+
+    # --- provenance ---
+    evidence: Mapped[str | None] = mapped_column(Text, nullable=True)
+    """The span of source text supporting this record. What lets an agent cite rather
+    than assert, and what makes a hallucination checkable by a human in one glance."""
+
+    knowledge_time: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True))
+    """Inherited from the document. See the class docstring."""
+    published_time: Mapped[dt.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    extractor_version: Mapped[str] = mapped_column(String(32))
+    """Which prompt produced this. Bump it and the corpus becomes unextracted again, so
+    a prompt change is a re-run rather than a migration — and the old rows survive long
+    enough to answer "did the new one actually do better?"."""
+    extracted_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
 
 class JobRun(Base):
