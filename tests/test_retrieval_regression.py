@@ -240,9 +240,9 @@ def test_as_of_hides_what_was_not_yet_known(corpus: Session) -> None:
     assert any("Carter" in h.text for h in later)
 
     earlier = lexical_search(corpus, "Jalen Carter foot", limit=10, as_of=BETWEEN)
-    assert not any(
-        "Carter" in h.text for h in earlier
-    ), "as_of returned a document whose knowledge_time is in the future"
+    assert not any("Carter" in h.text for h in earlier), (
+        "as_of returned a document whose knowledge_time is in the future"
+    )
 
 
 def test_as_of_returns_the_status_current_at_that_moment(corpus: Session) -> None:
