@@ -27,8 +27,11 @@ RUN uv sync --extra embed --no-install-project --frozen || uv sync --extra embed
 COPY . .
 RUN uv sync --extra embed --frozen || uv sync --extra embed
 
-# Model weights cached in a volume so a rebuild doesn't re-download 130 MB
-VOLUME ["/models"]
+# Model weights live in /models so a rebuild doesn't re-download 130 MB. No VOLUME
+# instruction: Railway rejects the Dockerfile outright if it finds one ("docker VOLUME
+# is not supported, use Railway Volumes"), and it buys nothing here — compose already
+# names the volume explicitly, and hosted platforms attach theirs out of band.
+RUN mkdir -p /models
 
 RUN chmod +x scripts/start.sh
 
