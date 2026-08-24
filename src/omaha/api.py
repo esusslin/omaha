@@ -30,6 +30,32 @@ from omaha.search_api import router as search_router
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
+
+def configure_logging() -> None:
+    """Attach a handler to the root logger, honouring `log_level`.
+
+    Without this every `logger.info` in the collector goes nowhere: Python's root logger
+    defaults to WARNING with no handler, and uvicorn only configures its own loggers.
+    Locally that's invisible because the CLI prints as it goes — but in a container the
+    scheduler is the only thing running, and it was reporting neither success nor
+    failure. A collector nobody can observe is indistinguishable from one that isn't
+    running, which is the same class of problem as a healthy pipeline over an empty pipe.
+
+    `force=True` because uvicorn may have configured handlers first; without it this is
+    a silent no-op, which would be a fitting bug for a logging fix to have.
+    """
+    logging.basicConfig(
+        level=settings.log_level.upper(),
+        format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
+        force=True,
+    )
+    # APScheduler logs every job submission at INFO. Useful when a job misfires,
+    # noise otherwise.
+    logging.getLogger("apscheduler.executors.default").setLevel(logging.WARNING)
+
+
+configure_logging()
+
 # Annotated dependency alias — keeps Depends() out of argument defaults (ruff B008)
 DbSession = Annotated[Session, Depends(get_session)]
 
