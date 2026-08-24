@@ -24,6 +24,7 @@ from sqlalchemy.orm import Session
 from omaha.config import get_settings
 from omaha.db.models import Document, JobRun, Source
 from omaha.db.session import get_session
+from omaha.records_api import router as records_router
 from omaha.scheduler import build_scheduler
 from omaha.search_api import router as search_router
 
@@ -90,6 +91,7 @@ app = FastAPI(
 )
 
 app.include_router(search_router)
+app.include_router(records_router)
 
 
 @app.get("/health")
