@@ -30,4 +30,9 @@ RUN uv sync --extra embed --frozen || uv sync --extra embed
 # Model weights cached in a volume so a rebuild doesn't re-download 130 MB
 VOLUME ["/models"]
 
-CMD ["uv", "run", "uvicorn", "omaha.api:app", "--host", "0.0.0.0", "--port", "8000"]
+RUN chmod +x scripts/start.sh
+
+# Migrations then uvicorn, on whatever port the platform assigns. See scripts/start.sh
+# for why both matter — locally $PORT is unset and this falls back to 8000, so compose
+# behaviour is unchanged.
+CMD ["./scripts/start.sh"]
