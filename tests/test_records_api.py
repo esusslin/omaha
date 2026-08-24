@@ -127,3 +127,43 @@ def test_naive_timestamps_are_treated_as_utc() -> None:
 def test_trailing_z_is_accepted() -> None:
     parsed = records_api._parse_as_of("2025-12-19T17:00:00Z")
     assert parsed is not None and parsed.utcoffset() == dt.timedelta(0)
+
+
+# --- rate limiting ------------------------------------------------------------------
+
+
+class FakeRequest:
+    def __init__(self, ip: str) -> None:
+        self.headers = {"x-forwarded-for": ip}
+        self.client = None
+
+
+def test_the_demo_endpoints_are_rate_limited() -> None:
+    """The demo URL is in a public README with no auth. Without a limit, one loop makes
+    it unavailable to everyone else and runs up a hosting bill."""
+    from fastapi import HTTPException
+
+    from omaha.search_api import RATE_LIMIT_REQUESTS, _hits, rate_limit
+
+    _hits.clear()
+    request = FakeRequest("203.0.113.7")
+    for _ in range(RATE_LIMIT_REQUESTS):
+        rate_limit(request)  # type: ignore[arg-type]
+
+    with pytest.raises(HTTPException) as exc:
+        rate_limit(request)  # type: ignore[arg-type]
+    assert exc.value.status_code == 429
+    assert "Retry-After" in (exc.value.headers or {})
+
+
+def test_callers_are_counted_separately() -> None:
+    """Behind Railway's proxy every visitor shares one socket address, so the limiter
+    keys on X-Forwarded-For. Getting this wrong would rate-limit the whole internet as a
+    single caller the moment one person ran a loop."""
+    from omaha.search_api import RATE_LIMIT_REQUESTS, _hits, rate_limit
+
+    _hits.clear()
+    for _ in range(RATE_LIMIT_REQUESTS):
+        rate_limit(FakeRequest("198.51.100.1"))  # type: ignore[arg-type]
+    # A different caller is unaffected — no exception.
+    rate_limit(FakeRequest("198.51.100.2"))  # type: ignore[arg-type]

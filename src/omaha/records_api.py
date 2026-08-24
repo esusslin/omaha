@@ -42,6 +42,7 @@ from omaha.config import get_settings
 from omaha.db.models import InjuryRecord, Source
 from omaha.db.session import get_session
 from omaha.extract.prompt import EXTRACTOR_VERSION
+from omaha.search_api import RateLimited
 
 settings = get_settings()
 
@@ -139,6 +140,7 @@ def _serialise(record: InjuryRecord) -> dict[str, Any]:
 @router.get("/injuries")
 def injuries(
     session: DbSession,
+    _limited: RateLimited,
     team: Annotated[str, Query(min_length=2, max_length=4, description="e.g. PHI")],
     as_of: Annotated[str | None, Query(description="ISO 8601; filters on knowledge_time")] = None,
     since: Annotated[
@@ -183,6 +185,7 @@ def injuries(
 @router.get("/injuries/trajectory")
 def trajectory(
     session: DbSession,
+    _limited: RateLimited,
     team: Annotated[str, Query(min_length=2, max_length=4)],
     player: Annotated[str, Query(min_length=2, description="substring match on name")],
     as_of: Annotated[str | None, Query(description="ISO 8601")] = None,
@@ -276,7 +279,7 @@ def trajectory(
 
 
 @router.get("/injuries/summary")
-def summary(session: DbSession) -> dict[str, Any]:
+def summary(session: DbSession, _limited: RateLimited) -> dict[str, Any]:
     """What's in the store, by team. Cheap enough to poll, useful for spotting a club
     whose collection has quietly stopped producing records."""
     rows = session.execute(

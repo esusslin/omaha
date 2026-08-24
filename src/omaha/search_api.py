@@ -17,10 +17,12 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
+import threading
+import time
 from functools import lru_cache
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
 from sqlalchemy.orm import Session
 
@@ -39,6 +41,75 @@ logger = logging.getLogger(__name__)
 DbSession = Annotated[Session, Depends(get_session)]
 
 router = APIRouter()
+
+# --- rate limiting ------------------------------------------------------------------
+#
+# The demo URL is in a public README, and every query costs a vector scan plus, on a
+# hybrid request, an ONNX forward pass. Unbounded, one curious person with a loop can
+# make the demo unavailable to everyone else and run up a hosting bill.
+#
+# A fixed window in process memory, deliberately: no Redis, no dependency, and it resets
+# on deploy. That's the right trade for a single-replica demo — the failure it prevents
+# is casual, and anyone determined enough to route around a per-IP window would also
+# route around something more sophisticated. **If this ever runs more than one replica
+# the limit becomes per-replica**, which is worth knowing before assuming it's enforced
+# globally.
+
+RATE_LIMIT_REQUESTS = 30
+RATE_LIMIT_WINDOW_SECONDS = 60
+
+_hits: dict[str, tuple[float, int]] = {}
+_hits_lock = threading.Lock()
+
+
+def _client_key(request: Request) -> str:
+    """Best available caller identity.
+
+    Railway terminates TLS at its edge, so `request.client.host` is a proxy address and
+    every visitor looks like one caller. `X-Forwarded-For` carries the real one — first
+    entry, since later entries are proxies. Spoofable, which is fine: this bounds
+    accidents, not adversaries.
+    """
+    forwarded = request.headers.get("x-forwarded-for")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
+def rate_limit(request: Request) -> None:
+    """Fixed-window limiter. Raises 429 with a Retry-After the caller can act on."""
+    key = _client_key(request)
+    now = time.monotonic()
+
+    with _hits_lock:
+        window_start, count = _hits.get(key, (now, 0))
+        if now - window_start >= RATE_LIMIT_WINDOW_SECONDS:
+            window_start, count = now, 0
+        count += 1
+        _hits[key] = (window_start, count)
+
+        # Bound the dictionary. Without this it grows one entry per unique caller
+        # forever — a slow leak that only shows up in production, and only after the
+        # demo gets attention.
+        if len(_hits) > 10_000:
+            cutoff = now - RATE_LIMIT_WINDOW_SECONDS
+            for stale in [k for k, (start, _) in _hits.items() if start < cutoff]:
+                _hits.pop(stale, None)
+
+    if count > RATE_LIMIT_REQUESTS:
+        retry_after = int(RATE_LIMIT_WINDOW_SECONDS - (now - window_start)) + 1
+        raise HTTPException(
+            429,
+            detail=(
+                f"rate limit: {RATE_LIMIT_REQUESTS} requests per "
+                f"{RATE_LIMIT_WINDOW_SECONDS}s. This is a demo on a single small "
+                "instance — clone the repo if you need more."
+            ),
+            headers={"Retry-After": str(retry_after)},
+        )
+
+
+RateLimited = Annotated[None, Depends(rate_limit)]
 
 
 @lru_cache(maxsize=1)
@@ -80,6 +151,7 @@ def _serialise(hit: SearchHit) -> dict[str, Any]:
 @router.get("/search")
 def search(
     session: DbSession,
+    _limited: RateLimited,
     q: Annotated[str, Query(min_length=2, description="Natural language question")],
     limit: Annotated[int, Query(ge=1, le=50)] = 10,
     candidates: Annotated[int, Query(ge=10, le=200)] = DEFAULT_CANDIDATES,

@@ -119,6 +119,70 @@ def _index() -> None:
     except Exception:
         logger.exception("embedding failed")
 
+    _extract()
+
+
+def _extract() -> None:
+    """Turn newly chunked text into typed records.
+
+    The third step of the pipeline, and it was missing: `_index` chunked and embedded and
+    then stopped, so Phase 4 ran only where someone typed the CLI command. Search worked
+    in production and `/injuries` returned an empty list — a system half-deployed in
+    exactly the way that looks fine from the outside.
+
+    **Bounded per run.** Each pass extracts at most `extract_batch_size` chunks, so a
+    backfill can't monopolise the hourly slot or spend the month's budget in one go. The
+    remainder stays pending and the next run continues — stamped chunks make it
+    resumable.
+
+    Skipped silently when no API key is configured, because a laptop without one should
+    still run the rest of the pipeline rather than erroring every hour.
+    """
+    from omaha.config import get_settings
+
+    settings = get_settings()
+
+    try:
+        from omaha.extract import client, store
+        from omaha.extract.prompt import EXTRACTOR_VERSION
+    except Exception:
+        logger.exception("extraction unavailable")
+        return
+
+    if not client.available():
+        logger.debug("no ANTHROPIC_API_KEY — chunks left unextracted")
+        return
+
+    written = processed = failed = 0
+    try:
+        with session_scope() as session:
+            chunks = store.pending_chunks(
+                session, EXTRACTOR_VERSION, limit=settings.extract_batch_size
+            )
+            if not chunks:
+                return
+            for chunk in chunks:
+                document = chunk.document
+                try:
+                    drafts = client.extract(
+                        chunk.text,
+                        team_hint=document.team if document else None,
+                        published=document.published_time if document else None,
+                    )
+                except Exception as exc:
+                    # One bad chunk costs one chunk. It stays unstamped and is retried.
+                    failed += 1
+                    logger.warning("extract failed chunk=%s %s", chunk.id, exc)
+                    continue
+                written += store.persist(session, chunk, drafts, version=EXTRACTOR_VERSION)
+                processed += 1
+    except Exception:
+        logger.exception("extraction run failed")
+        return
+
+    if processed:
+        logger.info("extracted %d records from %d chunks (%d failed)", written, processed, failed)
+
 
 def build_scheduler() -> BackgroundScheduler:
     scheduler = BackgroundScheduler(timezone=EASTERN)

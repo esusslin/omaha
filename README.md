@@ -5,6 +5,27 @@
 Document intelligence for NFL prediction — ingestion, hybrid retrieval, and evaluated LLM
 extraction over the text that structured feeds throw away.
 
+## Try it
+
+Running live, collecting on its own schedule:
+
+| | |
+|---|---|
+| **[Hybrid search over the corpus](https://omaha-production-17e9.up.railway.app/ui)** | Ask it something. Every result is tagged with which retriever found it — `dense`, `lexical`, or `both`. |
+| **[Typed injury records](https://omaha-production-17e9.up.railway.app/injuries?team=PHI)** | The machine-facing output. Note the `knowledge` field. |
+| **[Health and per-source staleness](https://omaha-production-17e9.up.railway.app/health)** | Not a liveness probe — it reports which of 62 sources are overdue. |
+| **[What's been extracted, by club](https://omaha-production-17e9.up.railway.app/injuries/summary)** | |
+
+Rate-limited to 30 requests a minute per caller — it's one small instance, and the
+limiter is a fixed window in process memory rather than anything clever. Clone the repo
+if you want to hammer it.
+
+Questions that show the two retrievers disagreeing:
+
+- *"Which Eagles lineman is out with a foot injury?"* — lexical finds it, dense doesn't
+- *"Why is the Commanders quarterback not playing?"* — dense finds it, lexical doesn't
+- *"Trey Pipkins back injury"* — an exact name, which is where embeddings are weakest
+
 ## The premise
 
 Injury feeds give you `Questionable`. They don't give you *"limited Wednesday, full
@@ -12,11 +33,47 @@ Thursday, coach said game-time decision"* — and the trajectory is the signal. 
 ingests official practice reports, inactives, transactions, transcripts and depth charts,
 and turns them into typed, cited context records.
 
+**That premise was tested before this was built, and it survived.** Across 90,467
+injury rows from 2009–2025, walk-forward by season: among players listed `Questionable`,
+the rate at which they actually took a snap runs 30% for those who didn't practise and
+55% for those who practised fully. Adding practice status to a model that already knows
+prior form, position and game designation improves AUC by **+0.054** on that panel, and
+by +0.043 on players carrying no game designation at all — the two groups where the
+club's own label says least. Mean absolute error on usage is flat to four decimal places,
+so the feature predicts *whether* a player takes the field, not *how much* he's used.
+
+That measurement lives in the private prediction repo, not here. It's stated because a
+data pipeline built on an untested assumption is a hobby, and the honest version of this
+README says which one this is.
+
 **Agents produce evidence, never probabilities.** That constraint is enforced in the
 output schema, not by convention. An LLM-produced probability has no calibration curve
 and no way to tell whether a prompt change improved it or merely moved it. Numbers come
 from statistical models that can be walk-forward validated; language models do extraction
 and judgement over text, where there is no ground truth to regress against.
+
+## Absence is not ignorance
+
+The single thing this system does that a structured feed cannot: say *why* a player has
+no records.
+
+```jsonc
+// GET /injuries?team=PHI
+{
+  "knowledge": "complete",   // sources fresh — an empty list means he isn't on the
+                             // report, which is information: he's healthy
+  "knowledge": "partial",    // some sources overdue — treat absence as unknown
+  "knowledge": "unknown",    // nothing collected, or all stale — an empty list says
+                             // nothing at all
+  "knowledge": "as_of_historical"  // you asked about the past; present freshness
+                                   // cannot speak to it
+}
+```
+
+Those cases produce identical JSON everywhere else, and conflating them is expensive. The
+consuming system's red-team agent downgraded 41% of picks when weather data was merely
+*missing*, having read "no value" as "bad value". `knowledge` is computed from source
+health rather than record counts, because counting records cannot tell the two apart.
 
 ## What this repository deliberately does not contain
 
@@ -33,11 +90,17 @@ document and agent infrastructure.
 | 0 | Foundations, schema, health endpoint | ✅ |
 | 1 | Ingestion — conditional fetch, parsers, bitemporal store, scheduler | ✅ |
 | 2 | Chunking, embeddings, hybrid retrieval | ✅ |
-| 3 | Gold set, eval harness | ✅ CI gate pending |
-| 4 | Agent runtime, typed context records | — |
+| 3 | Gold set, eval harness | ✅ gated in CI |
+| 4 | Typed context records — LLM extraction, `/injuries` | ✅ |
 | 5 | MCP servers | — |
 
-Current corpus: ~1,200 chunks from the 2025 season, four clubs.
+Corpus: 1,193 chunks and 1,402 typed records from the 2025 season. Deployed and
+collecting unattended — index discovery hourly, practice reports at 17:00 ET on
+Wednesday, Thursday and Friday, an hour after the league's filing deadline.
+
+Coverage is uneven **by measurement, not by assumption**: of 32 clubs, four curate a
+season archive of report articles. `run discover` reports what each index actually links
+rather than guessing.
 
 ---
 
@@ -75,6 +138,75 @@ discriminating took lexical from 0.150 to 0.625 MRR.
 
 Worth stating plainly: without the eval this would have shipped. Hybrid search "worked",
 returned plausible results, and was quietly running on one retriever.
+
+That bug is now a **canary in CI**. `tests/test_retrieval_regression.py` asks *"Which
+lineman is hurt with a back problem?"* — a question where "which", "lineman" and "hurt"
+appear in no chunk in the corpus. Under the old AND semantics it matches zero rows; the
+test asserts it returns something. Alongside it, a quality floor (hit@3 ≥ 100%, MRR ≥
+0.60) and two `as_of` assertions that check a player known only on Friday is invisible to
+a query dated Wednesday.
+
+The gate was **mutation-tested**: the AND semantics were deliberately reintroduced and the
+suite confirmed to go red before it was trusted. A passing test and a test that would
+catch the bug aren't the same thing, and the only way to know which you have is to break
+the code on purpose.
+
+Two smaller notes on that suite, both mistakes worth not repeating. The tests use a
+dedicated scratch database, because the first version ran against whatever `DATABASE_URL`
+pointed at — empty on CI, the full corpus on a laptop — so it passed where nobody looked
+and failed where they did. And CI fails if those tests *skip*: a skipped gate reports
+green forever.
+
+---
+
+## Extraction results
+
+1,193 chunks processed, 1,402 typed records.
+
+| field | coverage |
+|---|---|
+| evidence span | 100% |
+| team | 100% |
+| position | 97% |
+| injury | 90% |
+| practice status | 82% |
+| report day | 64% |
+| game status | 26% |
+
+`game_status` at 26% is correct, not a gap — clubs only designate on the final report.
+
+**`report_day` at 64% is a story about my own bug.** It sat at 55%, and the first two
+explanations I reached for were both wrong: that the model couldn't resolve "today"
+without a publication date (supplying one changed nothing), and that the missing rows
+were final-status rows that carry no day (the counts said 70% of them had a practice
+status). The actual cause was a closed vocabulary of `("WED", "THU", "FRI")` — the
+league's *filing deadline*, encoded as if it were the set of days clubs practise. Real
+rows read `Day: Tuesday`; the model extracted `TUE` correctly and validation discarded
+it. Widening to all seven weekdays recovered 119 records.
+
+The rest genuinely aren't recoverable: a final report states the last practice status and
+the game designation without labelling a day, and inferring one would be wrong often
+enough to matter in short weeks.
+
+### How the extractor is kept honest
+
+Everything the model returns passes through `extract/schema.py` before it can reach a
+row, and that module makes no API call — so the component most likely to be confidently
+wrong is also the one that's free to test.
+
+- **Grounding.** A record whose player isn't named in the source chunk is dropped. Ask a
+  model about injuries and it will produce a plausible NFL player who isn't in the text;
+  a fluent invention is more dangerous than a blank, because downstream it looks exactly
+  like a real record.
+- **Closed vocabularies.** `practice_status` is `DNP`/`LIMITED`/`FULL` or null.
+  "Limited participation in practice" — the actual source wording — becomes **null, not
+  LIMITED**. Mapping it would paper over a model not following the schema.
+- **Partial survival.** A garbled position doesn't discard a good practice status.
+- **`extractor_version` on every row.** Bump it and the corpus becomes unextracted, so a
+  prompt change is a re-run over stored chunks rather than a migration — and the old rows
+  survive long enough to answer "did v2 actually beat v1?" It has already been used to
+  prove a prompt change did *nothing*: v1 and v2 output were byte-identical on the same
+  chunks.
 
 ### The remaining miss
 
