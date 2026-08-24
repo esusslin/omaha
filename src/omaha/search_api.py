@@ -151,7 +151,6 @@ def _serialise(hit: SearchHit) -> dict[str, Any]:
 @router.get("/search")
 def search(
     session: DbSession,
-    _limited: RateLimited,
     q: Annotated[str, Query(min_length=2, description="Natural language question")],
     limit: Annotated[int, Query(ge=1, le=50)] = 10,
     candidates: Annotated[int, Query(ge=10, le=200)] = DEFAULT_CANDIDATES,
@@ -159,6 +158,10 @@ def search(
     as_of: Annotated[
         str | None, Query(description="ISO timestamp, e.g. 2025-12-19T17:00:00Z")
     ] = None,
+    # Defaulted rather than positional so the handler stays directly callable from a
+    # test. FastAPI runs the dependency either way; a required positional would mean
+    # every unit test has to know the endpoint is rate limited, which is not its concern.
+    _limited: RateLimited = None,
 ) -> dict[str, Any]:
     """Search the corpus.
 

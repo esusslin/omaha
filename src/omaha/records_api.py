@@ -140,13 +140,13 @@ def _serialise(record: InjuryRecord) -> dict[str, Any]:
 @router.get("/injuries")
 def injuries(
     session: DbSession,
-    _limited: RateLimited,
     team: Annotated[str, Query(min_length=2, max_length=4, description="e.g. PHI")],
     as_of: Annotated[str | None, Query(description="ISO 8601; filters on knowledge_time")] = None,
     since: Annotated[
         str | None, Query(description="ISO 8601; only facts learned after this")
     ] = None,
     limit: Annotated[int, Query(ge=1, le=500)] = 200,
+    _limited: RateLimited = None,
 ) -> dict[str, Any]:
     """Typed injury facts for one team, with an explicit statement of what we know.
 
@@ -185,10 +185,10 @@ def injuries(
 @router.get("/injuries/trajectory")
 def trajectory(
     session: DbSession,
-    _limited: RateLimited,
     team: Annotated[str, Query(min_length=2, max_length=4)],
     player: Annotated[str, Query(min_length=2, description="substring match on name")],
     as_of: Annotated[str | None, Query(description="ISO 8601")] = None,
+    _limited: RateLimited = None,
 ) -> dict[str, Any]:
     """One player's practice sequence — the shape the model wants, not a flat status.
 
@@ -279,7 +279,7 @@ def trajectory(
 
 
 @router.get("/injuries/summary")
-def summary(session: DbSession, _limited: RateLimited) -> dict[str, Any]:
+def summary(session: DbSession, _limited: RateLimited = None) -> dict[str, Any]:
     """What's in the store, by team. Cheap enough to poll, useful for spotting a club
     whose collection has quietly stopped producing records."""
     rows = session.execute(
