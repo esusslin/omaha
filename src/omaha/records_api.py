@@ -197,8 +197,8 @@ def trajectory(
     result in `research/practice_signal.py` (+0.054 AUC on the Questionable panel) is
     what makes this worth exposing separately.
 
-    **Scoped per week.** `latest` is the current report period — the one a model asking
-    "is he playing Sunday?" needs. `history` holds earlier weeks for anyone modelling
+    **Scoped per report.** `latest` is the most recent report — the one a model asking
+    "is he playing Sunday?" needs. `history` holds earlier reports for anyone modelling
     recovery over time. Flattening the two together was the first version of this
     endpoint and it produced a sequence spanning four unrelated injuries.
 
@@ -231,11 +231,16 @@ def trajectory(
     # Season and week would be cleaner but are frequently null on these documents —
     # grouping on a field that's often absent would silently merge everything into one
     # bucket, which is the bug this fix exists to remove.
+    # Grouped by source document. **A document is not always a week.** Some clubs publish
+    # one article covering Wed/Thu/Fri; others publish daily, in which case each group is a
+    # single day. The field is named `reports` rather than `weeks` because calling a daily
+    # article a week is a claim the data doesn't support — Atlanta returns 22 of them for
+    # one player across two months.
     episodes: dict[int, list[InjuryRecord]] = {}
     for record in records:
         episodes.setdefault(record.document_id, []).append(record)
 
-    def as_week(rows: list[InjuryRecord]) -> dict[str, Any]:
+    def as_report(rows: list[InjuryRecord]) -> dict[str, Any]:
         # Within a week, order by the day the practice happened, not by when we learned
         # it — a single fetch stamps every row in an article with the same knowledge_time,
         # so knowledge order says nothing about Wednesday before Thursday.
@@ -260,9 +265,9 @@ def trajectory(
             ],
         }
 
-    weeks = [as_week(rows) for rows in episodes.values()]
-    weeks.sort(key=lambda w: w["knowledge_time"])
-    latest = weeks[-1] if weeks else None
+    reports = [as_report(rows) for rows in episodes.values()]
+    reports.sort(key=lambda r: r["knowledge_time"])
+    latest = reports[-1] if reports else None
 
     return {
         "team": abbr,
@@ -270,11 +275,11 @@ def trajectory(
         "as_of": when.isoformat() if when else None,
         **_knowledge_state(session, abbr, when),
         "records": len(records),
-        "weeks": len(weeks),
+        "reports": len(reports),
         # The current week's trajectory — what a model asking "is he playing Sunday?"
-        # wants. Prior weeks are available below for anyone modelling recovery.
+        # wants. Prior reports are available below for anyone modelling recovery.
         "latest": latest,
-        "history": weeks[:-1] if len(weeks) > 1 else [],
+        "history": reports[:-1] if len(reports) > 1 else [],
     }
 
 

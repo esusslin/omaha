@@ -53,14 +53,14 @@ sources are overdue rather than just saying the server is up.
 **As a JSON API.** Every endpoint is a plain GET, no auth, no SDK.
 
 ```bash
-# who's on Philadelphia's report right now
-curl 'https://omaha-production-17e9.up.railway.app/injuries?team=PHI'
+# who's on Atlanta's report right now
+curl 'https://omaha-production-17e9.up.railway.app/injuries?team=ATL'
 
-# one player's week: DNP Wednesday, limited Thursday, full Friday?
-curl 'https://omaha-production-17e9.up.railway.app/injuries/trajectory?team=PHI&player=Carter'
+# Drake London's knee, week by week: DNP -> DNP -> LIMITED -> FULL
+curl 'https://omaha-production-17e9.up.railway.app/injuries/trajectory?team=ATL&player=London'
 
 # what was knowable at 5pm on a Friday last December — not what we know now
-curl 'https://omaha-production-17e9.up.railway.app/injuries?team=PHI&as_of=2025-12-19T22:00:00Z'
+curl 'https://omaha-production-17e9.up.railway.app/injuries?team=ATL&as_of=2025-12-05T22:00:00Z'
 
 # ask a question in English
 curl 'https://omaha-production-17e9.up.railway.app/search?q=which+lineman+is+hurt'
@@ -121,7 +121,7 @@ Running live, collecting on its own schedule:
 | | |
 |---|---|
 | **[Hybrid search over the corpus](https://omaha-production-17e9.up.railway.app/ui)** | Ask it something. Every result is tagged with which retriever found it — `dense`, `lexical`, or `both`. |
-| **[Typed injury records](https://omaha-production-17e9.up.railway.app/injuries?team=PHI)** | The machine-facing output. Note the `knowledge` field. |
+| **[Typed injury records](https://omaha-production-17e9.up.railway.app/injuries?team=ATL)** | The machine-facing output. Note the `knowledge` field. |
 | **[Health and per-source staleness](https://omaha-production-17e9.up.railway.app/health)** | Not a liveness probe — it reports which of 62 sources are overdue. |
 | **[What's been extracted, by club](https://omaha-production-17e9.up.railway.app/injuries/summary)** | |
 
@@ -167,7 +167,7 @@ The single thing this system does that a structured feed cannot: say *why* a pla
 no records.
 
 ```jsonc
-// GET /injuries?team=PHI
+// GET /injuries?team=ATL
 {
   "knowledge": "complete",   // sources fresh — an empty list means he isn't on the
                              // report, which is information: he's healthy
